@@ -1,0 +1,15 @@
+{
+  "name": "tank-duel-server",
+  "version": "1.0.0",
+  "description": "Tank Duel — 2-player online tank game server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.18.0"
+  }
+}
