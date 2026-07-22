@@ -109,6 +109,7 @@
     <span class="num" id="score1">0</span>
   </div>
   <div class="round" id="roundLabel">ROUND 1</div>
+  <div class="round" id="ping" style="min-width:88px"></div>
   <div class="score s2">
     <span class="num" id="score2">0</span>
     <div class="hp" id="hp2"></div>
@@ -192,8 +193,11 @@ const keys = {};
 addEventListener('keydown', e => {
   keys[e.code] = true;
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
-  const canControlRounds = mode === 'bot' || (mode === 'online' && net.role === 'host');
-  if (!canControlRounds) return;
+  if (mode === 'online') {
+    if (net.connected && net.idx === 1) sendInput();
+    if (net.idx !== 0) return;
+    // the host's browser runs the match, so round controls act locally
+  } else if (mode !== 'bot') return;
   if (e.code === 'KeyN' && (state === 'play' || state === 'countdown')) newRound(true);
   if (e.code === 'KeyR' && state !== 'menu') { scores = [0,0]; round = 1; updateHUD(); newRound(); }
   if ((e.code === 'Space' || e.code === 'KeyZ' || e.code === 'KeyX') && state === 'roundOver') {
@@ -201,7 +205,10 @@ addEventListener('keydown', e => {
     newRound();
   }
 });
-addEventListener('keyup', e => keys[e.code] = false);
+addEventListener('keyup', e => {
+  keys[e.code] = false;
+  if (mode === 'online' && net.connected && net.idx === 1) sendInput();
+});
 
 let myType = 'classic'; // 'classic' | 'gunner'
 
@@ -225,14 +232,14 @@ function localInput() {
 
 // ---------- NETWORK (WebRTC peer-to-peer) ----------
 const net = {
-  role: null, ws: null, connected: false, room: null,
+  role: null, ws: null, connected: false, room: null, idx: 0, rtt: null,
   remoteInput: {}, prevRemoteAdv: false,
   inSeq: 0, snapSeq: 0, lastSnapSeq: -1, lastInSeq: -1,
   sendT: 0, events: []
 };
 
 function netEv(e) {
-  if (mode === 'online' && net.role === 'host' && net.connected) net.events.push(e);
+  if (mode === 'online' && net.idx === 0 && net.connected) net.events.push(e);
 }
 
 function wsConnect() {
@@ -259,6 +266,7 @@ function setupWS(ws) {
       showRoom(m.code);
     } else if (m.t === 'ready') {
       net.connected = true;
+      net.idx = m.idx != null ? m.idx : (net.role === 'host' ? 0 : 1);
       setStatus('FRIEND CONNECTED!');
       setTimeout(startOnlineGame, 400);
     } else if (m.t === 'err') {
@@ -266,14 +274,15 @@ function setupWS(ws) {
     } else if (m.t === 'peer_left') {
       if (net.connected) onDisconnect();
       else setStatus('YOUR FRIEND LEFT THE ROOM');
-    } else if (m.t === 'input' && net.role === 'host') {
+    } else if (m.t === 'input' && net.idx === 0) {
       if (m.q <= net.lastInSeq) return;
       net.lastInSeq = m.q;
       net.remoteInput = m.k;
+      if (m.pt) net.lastPeerT = m.pt;
       if (m.k.ty && tanks[1] && tanks[1].type !== m.k.ty) tanks[1].type = m.k.ty;
       if (state === 'roundOver' && m.k.adv && !net.prevRemoteAdv) { round++; newRound(); }
       net.prevRemoteAdv = m.k.adv;
-    } else if (m.t === 'snap' && net.role === 'guest') {
+    } else if (m.t === 'snap' && net.idx === 1) {
       if (m.q <= net.lastSnapSeq) return;
       net.lastSnapSeq = m.q;
       applySnapshot(m);
@@ -285,7 +294,7 @@ function setupWS(ws) {
 async function hostCreate() {
   net.role = 'host';
   setupWS(await wsConnect());
-  netSendRaw({ t: 'create' });
+  netSendRaw({ t: 'create', gm: gameMode });
 }
 
 async function guestJoin(code) {
@@ -294,13 +303,90 @@ async function guestJoin(code) {
   netSendRaw({ t: 'join', code });
 }
 
+// guest-side prediction: run our own tank's movement locally with the same
+// physics the host uses, so steering feels instant instead of waiting a round trip
+let myBullets = []; // guest's locally predicted shells (visual; host stays authoritative for damage)
+
+function predictOwnTank(t, dt) {
+  const c = localInput();
+  if (c.left) { t.angle -= T_TURN; if (t.type === 'gunner') t.turret -= T_TURN; }
+  if (c.right) { t.angle += T_TURN; if (t.type === 'gunner') t.turret += T_TURN; }
+  if (t.type === 'gunner') {
+    if (c.tl) t.turret -= T_TURRET;
+    if (c.tr) t.turret += T_TURRET;
+  } else {
+    t.turret = t.angle;
+  }
+  let v = 0;
+  if (c.fwd) v = T_SPEED;
+  if (c.back) v = -T_SPEED * 0.62;
+  if (v !== 0) t.treadPhase += Math.abs(v) * 0.25;
+  const nx = t.x + Math.cos(t.angle) * v;
+  const ny = t.y + Math.sin(t.angle) * v;
+  if (!circleHitsWall(nx, t.y, T_RADIUS)) t.x = nx;
+  if (!circleHitsWall(t.x, ny, T_RADIUS)) t.y = ny;
+  const other = tanks[1 - t.id];
+  if (other.alive) {
+    const dx = t.x - other.x, dy = t.y - other.y;
+    const d = Math.hypot(dx, dy);
+    if (d > 0 && d < T_RADIUS * 2) {
+      const push = (T_RADIUS*2 - d) / 2;
+      const px = dx/d * push, py = dy/d * push;
+      if (!circleHitsWall(t.x + px, t.y + py, T_RADIUS)) { t.x += px; t.y += py; }
+    }
+  }
+  // instant local firing (the host confirms damage; we show the shell immediately)
+  t.cooldown -= dt;
+  t.recoil = Math.max(0, t.recoil - dt * 0.06);
+  if (c.fire && t.cooldown <= 0 && myBullets.length < 4) {
+    t.cooldown = 380;
+    t.recoil = 5;
+    const mx = t.x + Math.cos(t.turret) * 20;
+    const my = t.y + Math.sin(t.turret) * 20;
+    myBullets.push({ x: mx, y: my, vx: Math.cos(t.turret) * 5.6, vy: Math.sin(t.turret) * 5.6,
+                     bounces: 2, life: 4200 });
+    muzzleFx(mx, my, t.turret);
+  }
+}
+
+// predicted shells: movement + bounces + purely visual impacts
+function updateMyBullets(dt) {
+  for (let i = myBullets.length - 1; i >= 0; i--) {
+    const b = myBullets[i];
+    b.life -= dt;
+    if (b.life <= 0) { myBullets.splice(i, 1); continue; }
+    let removed = false;
+    for (let s = 0; s < 2 && !removed; s++) {
+      const nx = b.x + b.vx / 2, ny = b.y + b.vy / 2;
+      const hit = solidAt(nx, ny);
+      if (hit === 1) { // brick: show debris now, the host removes the tile a beat later
+        brickDebris(Math.floor(nx/TILE)*TILE + TILE/2, Math.floor(ny/TILE)*TILE + TILE/2);
+        myBullets.splice(i, 1); removed = true; break;
+      }
+      if (hit === 2) {
+        if (b.bounces <= 0) { sparks(b.x, b.y, '#cfd6dd'); myBullets.splice(i, 1); removed = true; break; }
+        b.bounces--;
+        const hx = solidAt(b.x + b.vx / 2, b.y) !== 0;
+        const hy = solidAt(b.x, b.y + b.vy / 2) !== 0;
+        if (hx) b.vx = -b.vx;
+        if (hy) b.vy = -b.vy;
+        if (!hx && !hy) { b.vx = -b.vx; b.vy = -b.vy; }
+        sparks(b.x, b.y, '#e8ecf0');
+      } else if (hit === 0) { b.x = nx; b.y = ny; }
+    }
+    if (removed) continue;
+    // visual impact on the opponent (host decides the real damage)
+    const foe = tanks[1 - net.idx];
+    if (foe.alive && (foe.x-b.x)**2 + (foe.y-b.y)**2 < (T_RADIUS+3)**2) myBullets.splice(i, 1);
+  }
+}
+
 function startOnlineGame() {
   mode = 'online';
   scores = [0, 0]; round = 1;
-  setNames(net.role === 'host' ? 'YOU' : 'FRIEND', net.role === 'host' ? 'FRIEND' : 'YOU');
+  setNames(net.idx === 0 ? 'YOU' : 'FRIEND', net.idx === 0 ? 'FRIEND' : 'YOU');
   hideOverlay();
-  if (net.role === 'host') newRound();
-  // guest just waits for snapshots
+  if (net.idx === 0) newRound(); // the host's browser runs the match
 }
 
 function onDisconnect() {
@@ -314,26 +400,36 @@ function sendSnapshot() {
   const snap = {
     t: 'snap', q: ++net.snapSeq,
     st: state, cd: Math.max(0, countdownT | 0), rd: round, sc: scores, wn: lastWinner,
-    gm: gameMode,
-    dm: gameMode === 'dom' ? { p: dom.pts, c: [+dom.cap[0].toFixed(1), +dom.cap[1].toFixed(1)], o: dom.owner, rs: [dom.resp[0] | 0, dom.resp[1] | 0] } : null,
+    gm: gameMode, ep: net.lastPeerT || 0,
+    dm: gameMode === 'dom'
+      ? { p: dom.pts, c: [+dom.cap[0].toFixed(1), +dom.cap[1].toFixed(1)], o: dom.owner, rs: [dom.resp[0] | 0, dom.resp[1] | 0] }
+      : null,
     g: grid.flat().join(''),
     tk: tanks.map(t => ({ x: +t.x.toFixed(1), y: +t.y.toFixed(1), a: +t.angle.toFixed(3), tu: +t.turret.toFixed(3), ty: t.type, hp: t.hp, al: t.alive ? 1 : 0 })),
     bl: bullets.map(b => ({ x: +b.x.toFixed(1), y: +b.y.toFixed(1), vx: +b.vx.toFixed(2), vy: +b.vy.toFixed(2), o: b.owner })),
-    ev: net.events
+    ev: net.events.splice(0)
   };
-  net.events = [];
   netSendRaw(snap);
 }
 
 function sendInput() {
   if (!net.connected) return;
-  netSendRaw({ t: 'input', q: ++net.inSeq, k: localInput() });
+  netSendRaw({ t: 'input', q: ++net.inSeq, k: localInput(), pt: Date.now() });
 }
 
 function applySnapshot(m) {
   const prevState = state;
   state = m.st; countdownT = m.cd; round = m.rd; scores = m.sc; lastWinner = m.wn;
   gameMode = m.gm || 'dm';
+  if (m.ep) {
+    const rtt = Date.now() - m.ep;
+    if (rtt >= 0 && rtt < 5000) {
+      net.rtt = net.rtt == null ? rtt : net.rtt * 0.8 + rtt * 0.2;
+      const el = document.getElementById('ping');
+      el.textContent = 'PING ' + Math.round(net.rtt) + 'ms';
+      el.style.color = net.rtt < 90 ? '#9df06b' : net.rtt < 180 ? '#e8c85a' : '#e05555';
+    }
+  }
   if (m.dm) { dom.pts = m.dm.p; dom.cap = m.dm.c; dom.owner = m.dm.o; dom.resp = m.dm.rs; }
   for (let r = 0; r < ROWS; r++)
     for (let c = 0; c < COLS; c++)
@@ -364,7 +460,7 @@ function applySnapshot(m) {
     clearTimeout(overlayTimer);
     overlayTimer = setTimeout(() => {
       if (state !== 'roundOver') return;
-      const iWon = lastWinner === 1; // guest is tank 1
+      const iWon = lastWinner === net.idx;
       let title, sub;
       if (gameMode === 'dom') {
         title = iWon ? 'YOU WIN THE MATCH' : 'YOUR FRIEND DOMINATES';
@@ -545,10 +641,7 @@ let tanks = [];
 const T_RADIUS = 13, T_SPEED = 2.3, T_TURN = 0.052, T_TURRET = 0.07;
 
 function controls(t) {
-  if (mode === 'online') {
-    // host simulates: tank 0 = host keys, tank 1 = guest's transmitted keys
-    return t.id === 0 ? localInput() : (net.remoteInput || {});
-  }
+  if (mode === 'online') return t.id === 0 ? localInput() : (net.remoteInput || {});
   return t.id === 0 ? localInput() : (t.aiInput || {});
 }
 
@@ -965,7 +1058,6 @@ function draw() {
     ctx.arc(b.x, b.y, 1.5, 0, Math.PI * 2);
     ctx.fillStyle = '#fff'; ctx.fill();
   }
-
   for (const t of tanks) drawTank(t);
 
   for (const p of particles) {
@@ -1227,25 +1319,26 @@ function loop(now) {
   const dt = Math.min(40, now - last);
   last = now;
 
-  const isGuest = mode === 'online' && net.role === 'guest';
+  const isOnline = mode === 'online';
+  const guestView = isOnline && net.idx === 1;
 
   if (state === 'play' || state === 'roundOver' || state === 'countdown') {
     if (state === 'countdown') {
       countdownT -= dt;
-      if (!isGuest && countdownT <= 0) {
+      if (!guestView && countdownT <= 0) {
         state = 'play';
         keys['Space'] = keys['KeyZ'] = keys['KeyX'] = false;
       }
-      if (isGuest && countdownT < 0) countdownT = 0; // wait for host's snapshot to flip state
+      if (guestView && countdownT < 0) countdownT = 0; // the host's snapshot flips the state
     }
 
-    if (isGuest) {
-      // guest: smooth toward host snapshots, advance bullets locally
+    if (guestView) {
+      // authentic mode: everything the guest sees is the host's true game state
       for (const t of tanks) {
-        t.x += (t.nx - t.x) * 0.35;
-        t.y += (t.ny - t.y) * 0.35;
-        t.angle = lerpAngle(t.angle, t.na, 0.45);
-        t.turret = lerpAngle(t.turret, t.ntu, 0.45);
+        t.x += (t.nx - t.x) * 0.5;
+        t.y += (t.ny - t.y) * 0.5;
+        t.angle = lerpAngle(t.angle, t.na, 0.55);
+        t.turret = lerpAngle(t.turret, t.ntu, 0.55);
         if (Math.hypot(t.nx - t.x, t.ny - t.y) > 0.5) t.treadPhase += 0.5;
       }
       const f = dt / 16.67;
@@ -1273,12 +1366,12 @@ function loop(now) {
     if (state === 'countdown') drawCountdown();
   }
 
-  // network pumps at ~20Hz
+  // network pumps at ~30Hz
   if (mode === 'online' && net.connected) {
     netTimer += dt;
-    if (netTimer >= 50) {
+    if (netTimer >= 33) {
       netTimer = 0;
-      if (net.role === 'host') sendSnapshot();
+      if (net.idx === 0) sendSnapshot();
       else sendInput();
     }
   }
