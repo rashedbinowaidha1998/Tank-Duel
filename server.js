@@ -1,5 +1,6 @@
-// TANK DUEL — game server
-// Serves the game page and relays messages between two players in a room.
+// TANK DUEL CLASSIC — relay server
+// The room creator's browser runs the match (host-authoritative, no prediction).
+// The server serves the page and relays messages between the two players.
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
@@ -14,9 +15,9 @@ const server = http.createServer((req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
-const rooms = new Map(); // code -> { host, guest }
+const rooms = new Map(); // code -> { clients: [hostWs, guestWs] }
 
-const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no confusing 0/O/1/I
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 function genCode() {
   let c = '';
   for (let i = 0; i < 4; i++) c += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)];
@@ -25,6 +26,8 @@ function genCode() {
 
 wss.on('connection', ws => {
   ws.isAlive = true;
+  // send packets immediately, never batch (batching adds latency)
+  if (ws._socket && ws._socket.setNoDelay) ws._socket.setNoDelay(true);
   ws.on('pong', () => ws.isAlive = true);
 
   ws.on('message', data => {
@@ -33,48 +36,45 @@ wss.on('connection', ws => {
 
     if (m.t === 'create') {
       const code = genCode();
-      rooms.set(code, { host: ws, guest: null });
-      ws.room = code;
+      rooms.set(code, { clients: [ws, null] });
+      ws.room = code; ws.idx = 0;
       ws.send(JSON.stringify({ t: 'room', code }));
 
     } else if (m.t === 'join') {
       const code = String(m.code || '').toUpperCase();
       const room = rooms.get(code);
-      if (!room || room.host.readyState !== 1) {
+      if (!room || !room.clients[0] || room.clients[0].readyState !== 1) {
         ws.send(JSON.stringify({ t: 'err', msg: 'ROOM NOT FOUND — CHECK THE CODE' }));
         return;
       }
-      if (room.guest) {
+      if (room.clients[1]) {
         ws.send(JSON.stringify({ t: 'err', msg: 'ROOM IS FULL' }));
         return;
       }
-      room.guest = ws;
-      ws.room = code;
-      ws.partner = room.host;
-      room.host.partner = ws;
-      const ready = JSON.stringify({ t: 'ready' });
-      room.host.send(ready);
-      ws.send(ready);
+      room.clients[1] = ws;
+      ws.room = code; ws.idx = 1;
+      room.clients[0].send(JSON.stringify({ t: 'ready', idx: 0 }));
+      ws.send(JSON.stringify({ t: 'ready', idx: 1 }));
 
-    } else if (ws.partner && ws.partner.readyState === 1) {
-      // paired: relay game traffic (snapshots / inputs) to the other player
-      ws.partner.send(data.toString());
+    } else {
+      // paired game traffic (snapshots / inputs): relay to the other player
+      const room = rooms.get(ws.room);
+      if (!room) return;
+      const other = room.clients[ws.idx === 0 ? 1 : 0];
+      if (other && other.readyState === 1) other.send(data.toString());
     }
   });
 
   ws.on('close', () => {
-    if (ws.partner && ws.partner.readyState === 1) {
-      ws.partner.send(JSON.stringify({ t: 'peer_left' }));
-      ws.partner.partner = null;
-    }
-    if (ws.room) {
-      const r = rooms.get(ws.room);
-      if (r && (r.host === ws || r.guest === ws)) rooms.delete(ws.room);
+    const room = rooms.get(ws.room);
+    if (room) {
+      const other = room.clients[ws.idx === 0 ? 1 : 0];
+      if (other && other.readyState === 1) other.send(JSON.stringify({ t: 'peer_left' }));
+      rooms.delete(ws.room);
     }
   });
 });
 
-// heartbeat: drop dead connections, clean their rooms
 setInterval(() => {
   wss.clients.forEach(ws => {
     if (!ws.isAlive) return ws.terminate();
@@ -83,4 +83,4 @@ setInterval(() => {
   });
 }, 30000);
 
-server.listen(PORT, () => console.log('Tank Duel server running on port ' + PORT));
+server.listen(PORT, () => console.log('Tank Duel Classic relay on port ' + PORT));
