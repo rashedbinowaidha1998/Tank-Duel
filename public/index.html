@@ -183,6 +183,7 @@ let state = 'menu'; // menu | countdown | play | roundOver
 let mode = null;    // 'bot' | 'online'
 let countdownT = 0;
 let shake = 0, particles = [], bullets = [];
+let bulletSeq = 0;
 let overlayTimer = null;
 let lastWinner = 0;
 let gameMode = 'dm'; // 'dm' deathmatch | 'dom' domination
@@ -232,7 +233,7 @@ function localInput() {
 
 // ---------- NETWORK (WebRTC peer-to-peer) ----------
 const net = {
-  role: null, ws: null, connected: false, room: null, idx: 0, rtt: null,
+  role: null, ws: null, connected: false, room: null, idx: 0, rtt: null, snapBuf: [],
   remoteInput: {}, prevRemoteAdv: false,
   inSeq: 0, snapSeq: 0, lastSnapSeq: -1, lastInSeq: -1,
   sendT: 0, events: []
@@ -286,6 +287,8 @@ function setupWS(ws) {
       if (m.q <= net.lastSnapSeq) return;
       net.lastSnapSeq = m.q;
       applySnapshot(m);
+      net.snapBuf.push({ rt: performance.now(), m });
+      if (net.snapBuf.length > 40) net.snapBuf.shift();
     }
   };
   ws.onclose = () => { if (net.connected) onDisconnect(); };
@@ -406,7 +409,7 @@ function sendSnapshot() {
       : null,
     g: grid.flat().join(''),
     tk: tanks.map(t => ({ x: +t.x.toFixed(1), y: +t.y.toFixed(1), a: +t.angle.toFixed(3), tu: +t.turret.toFixed(3), ty: t.type, hp: t.hp, al: t.alive ? 1 : 0 })),
-    bl: bullets.map(b => ({ x: +b.x.toFixed(1), y: +b.y.toFixed(1), vx: +b.vx.toFixed(2), vy: +b.vy.toFixed(2), o: b.owner })),
+    bl: bullets.map(b => ({ i: b.id, x: +b.x.toFixed(1), y: +b.y.toFixed(1), o: b.owner })),
     ev: net.events.splice(0)
   };
   netSendRaw(snap);
@@ -436,12 +439,8 @@ function applySnapshot(m) {
       grid[r][c] = +m.g[r * COLS + c];
   m.tk.forEach((s, i) => {
     const t = tanks[i];
-    const jump = !t.alive !== !s.al || Math.hypot(t.x - s.x, t.y - s.y) > 80;
-    t.nx = s.x; t.ny = s.y; t.na = s.a; t.ntu = s.tu; t.type = s.ty;
-    if (jump) { t.x = s.x; t.y = s.y; t.angle = s.a; t.turret = s.tu; }
-    t.hp = s.hp; t.alive = !!s.al;
+    t.type = s.ty; t.hp = s.hp; t.alive = !!s.al;
   });
-  bullets = m.bl.map(b => ({ x: b.x, y: b.y, vx: b.vx, vy: b.vy, owner: b.o }));
   for (const e of m.ev) {
     if (e.e === 'sp') sparks(e.x, e.y, e.c, e.n);
     else if (e.e === 'br') brickDebris(e.x, e.y);
@@ -472,6 +471,7 @@ function applySnapshot(m) {
       showOverlay(title, sub, iWon ? 'var(--p2)' : 'var(--p1)');
     }, 500);
   }
+  if (state === 'countdown' && prevState !== 'countdown') net.snapBuf.length = 0;
   if (state !== 'roundOver' && state !== 'menu') { clearTimeout(overlayTimer); hideOverlay(); }
 }
 
@@ -719,6 +719,7 @@ function fire(t) {
   const mx = t.x + Math.cos(t.turret) * 20;
   const my = t.y + Math.sin(t.turret) * 20;
   bullets.push({
+    id: ++bulletSeq,
     x: mx, y: my,
     vx: Math.cos(t.turret) * 5.6, vy: Math.sin(t.turret) * 5.6,
     owner: t.id, bounces: 2, grace: 160, life: 4200
@@ -1307,6 +1308,45 @@ if (roomParam) {
 // ---------- LOOP ----------
 let last = performance.now();
 let netTimer = 0;
+let simAcc = 0;
+
+const INTERP_DELAY = 50; // guest renders this many ms in the past, absorbing jitter
+
+function renderFromBuffer() {
+  const buf = net.snapBuf;
+  if (!buf.length) return;
+  const rt = performance.now() - INTERP_DELAY;
+  let a = buf[0], b = buf[buf.length - 1];
+  for (let i = buf.length - 1; i >= 0; i--) {
+    if (buf[i].rt <= rt) {
+      a = buf[i];
+      b = buf[Math.min(i + 1, buf.length - 1)];
+      break;
+    }
+  }
+  const span = b.rt - a.rt;
+  const f = span > 0 ? Math.min(1, Math.max(0, (rt - a.rt) / span)) : 1;
+  a.m.tk.forEach((sa, i) => {
+    const sb = b.m.tk[i], t = tanks[i];
+    const px = t.x, py = t.y;
+    if (Math.hypot(sb.x - sa.x, sb.y - sa.y) > 120) {
+      // teleport (respawn / new round): snap, don't sweep across the map
+      t.x = sb.x; t.y = sb.y; t.angle = sb.a; t.turret = sb.tu;
+    } else {
+      t.x = sa.x + (sb.x - sa.x) * f;
+      t.y = sa.y + (sb.y - sa.y) * f;
+      t.angle = lerpAngle(sa.a, sb.a, f);
+      t.turret = lerpAngle(sa.tu, sb.tu, f);
+    }
+    if (Math.hypot(t.x - px, t.y - py) > 0.3) t.treadPhase += 0.5;
+  });
+  const mapA = new Map(a.m.bl.map(x => [x.i, x]));
+  bullets = b.m.bl.map(sb2 => {
+    const sa2 = mapA.get(sb2.i);
+    if (sa2) return { x: sa2.x + (sb2.x - sa2.x) * f, y: sa2.y + (sb2.y - sa2.y) * f, owner: sb2.o };
+    return { x: sb2.x, y: sb2.y, owner: sb2.o };
+  });
+}
 
 function lerpAngle(a, b, f) {
   let d = b - a;
@@ -1333,29 +1373,29 @@ function loop(now) {
     }
 
     if (guestView) {
-      // authentic mode: everything the guest sees is the host's true game state
-      for (const t of tanks) {
-        t.x += (t.nx - t.x) * 0.5;
-        t.y += (t.ny - t.y) * 0.5;
-        t.angle = lerpAngle(t.angle, t.na, 0.55);
-        t.turret = lerpAngle(t.turret, t.ntu, 0.55);
-        if (Math.hypot(t.nx - t.x, t.ny - t.y) > 0.5) t.treadPhase += 0.5;
-      }
-      const f = dt / 16.67;
-      for (const b of bullets) { b.x += b.vx * f; b.y += b.vy * f; }
+      // authentic mode: render the host's true game state, buffered ~50ms
+      // and interpolated between snapshots so network jitter can't cause jerks
+      renderFromBuffer();
     } else if (state === 'play') {
-      if (mode === 'bot') updateAI(tanks[1], dt);
-      for (const t of tanks) updateTank(t, dt);
-      updateBullets(dt);
-      if (gameMode === 'dom') {
-        updateDom(dt);
-        for (const i of [0, 1]) {
-          if (!tanks[i].alive) {
-            dom.resp[i] -= dt;
-            if (dom.resp[i] <= 0) respawn(i);
+      simAcc += dt;
+      let steps = 0;
+      while (simAcc >= 16.667 && steps < 4) {
+        simAcc -= 16.667; steps++;
+        const sdt = 16.667;
+        if (mode === 'bot') updateAI(tanks[1], sdt);
+        for (const t of tanks) updateTank(t, sdt);
+        updateBullets(sdt);
+        if (gameMode === 'dom') {
+          updateDom(sdt);
+          for (const i of [0, 1]) {
+            if (!tanks[i].alive) {
+              dom.resp[i] -= sdt;
+              if (dom.resp[i] <= 0) respawn(i);
+            }
           }
         }
       }
+      if (steps === 4) simAcc = 0; // don't spiral after a long tab stall
     } else {
       updateBullets(dt); // let stray bullets finish during roundOver
     }
@@ -1366,10 +1406,10 @@ function loop(now) {
     if (state === 'countdown') drawCountdown();
   }
 
-  // network pumps at ~30Hz
+  // network pumps at ~60Hz
   if (mode === 'online' && net.connected) {
     netTimer += dt;
-    if (netTimer >= 33) {
+    if (netTimer >= 16) {
       netTimer = 0;
       if (net.idx === 0) sendSnapshot();
       else sendInput();
