@@ -519,6 +519,7 @@ function onDisconnect() {
 function sendInput() {
   if (!net.connected) return;
   netSendRaw({ t: 'input', q: ++net.inSeq, k: localInput(), pt: Date.now(),
+               am: tanks[net.idx] && tanks[net.idx].ammo != null ? +tanks[net.idx].ammo.toFixed(2) : 5,
                sh: myShells.map(b => ({ i: b.i, x: +b.x.toFixed(1), y: +b.y.toFixed(1) })) });
 }
 
@@ -554,6 +555,7 @@ function applySnapshot(m) {
     const t = tanks[i];
     if (!t) return;
     if (i === net.idx && !t.alive && s.al) t.ammo = 5; // fresh spawn, fresh magazine
+    if (i !== net.idx && s.am != null) t.ammoView = s.am;
     t.type = s.ty; t.hp = s.hp; t.alive = !!s.al; t.gone = !!s.gn;
     if (i === net.idx) { t.sx = s.x; t.sy = s.y; t.sa = s.a; t.stu = s.tu; }
   });
@@ -1216,7 +1218,36 @@ function draw() {
 
   for (const t of tanks) drawTank(t);
 
-  // player names above tanks
+  // shell cylinders above every tank
+  if (mode === 'online' || mode === 'bot') {
+    for (const t of tanks) {
+      if (!t.alive || t.gone) continue;
+      let a;
+      if (mode === 'bot') a = t.ammo != null ? t.ammo : 5;
+      else a = t.id === net.idx ? t.ammo : (t.ammoView != null ? t.ammoView : 5);
+      if (a == null) continue;
+      const full = Math.floor(a), frac = a - full;
+      const sw = 4, gp = 2, tot = 5*sw + 4*gp;
+      const x0 = t.x - tot/2, yb = t.y - 21;
+      for (let i2 = 0; i2 < 5; i2++) {
+        const x = x0 + i2*(sw + gp);
+        ctx.fillStyle = 'rgba(0,0,0,.35)';
+        ctx.fillRect(x, yb - 6, sw, 6);
+        if (i2 < full) {
+          ctx.fillStyle = t.color;
+          ctx.fillRect(x, yb - 6, sw, 6);
+          ctx.beginPath(); ctx.arc(x + sw/2, yb - 6, sw/2, Math.PI, 0); ctx.fill();
+        } else if (i2 === full && frac > 0.05) {
+          ctx.fillStyle = t.color;
+          ctx.globalAlpha = 0.4;
+          ctx.fillRect(x, yb - 6*frac, sw, 6*frac); // shell being loaded
+          ctx.globalAlpha = 1;
+        }
+      }
+    }
+  }
+
+  // player names above tanks (above the shells)
   if (mode === 'online' && net.roster) {
     ctx.font = '700 10px "Courier New", monospace';
     ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
@@ -1224,7 +1255,7 @@ function draw() {
       if (!t.alive || t.gone || t.id === net.idx) continue;
       ctx.globalAlpha = 0.75;
       ctx.fillStyle = t.color;
-      ctx.fillText(net.roster[t.id].n, t.x, t.y - 20);
+      ctx.fillText(net.roster[t.id].n, t.x, t.y - 30);
       ctx.globalAlpha = 1;
     }
   }
