@@ -1748,7 +1748,7 @@ function updateMyShells(dt) {
   }
 }
 
-const INTERP_DELAY = 60; // opponent renders this far behind the host clock, absorbing jitter
+const INTERP_DELAY = 40; // opponents render this far behind the server clock, absorbing jitter
 
 function renderFromBuffer() {
   const buf = net.snapBuf;
@@ -1844,7 +1844,7 @@ function loopStep(now) {
   // network pumps at ~30Hz
   if (mode === 'online' && net.connected) {
     netTimer += dt;
-    if (netTimer >= 33) {
+    if (netTimer >= 16) {
       netTimer = 0;
       sendInput();
     }
