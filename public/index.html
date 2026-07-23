@@ -678,7 +678,7 @@ function makeTank(id, x, y, angle, color, dark) {
 }
 let tanks = [];
 
-const T_RADIUS = 13, T_SPEED = 2.3, T_TURN = 0.052, T_TURRET = 0.07;
+const T_RADIUS = 13, T_SPEED = 3.2, T_TURN = 0.065, T_TURRET = 0.088; // ~1.4x tuned
 
 function controls(t) {
   // bot mode only; online simulation lives on the server
@@ -762,7 +762,7 @@ function fire(t) {
   bullets.push({
     id: ++bulletSeq,
     x: mx, y: my,
-    vx: Math.cos(t.turret) * 5.6, vy: Math.sin(t.turret) * 5.6,
+    vx: Math.cos(t.turret) * 7.8, vy: Math.sin(t.turret) * 7.8,
     owner: t.id, bounces: 2, grace: 160, life: 4200
   });
   muzzleFx(mx, my, t.turret);
@@ -1405,7 +1405,7 @@ function predictOwnTank(t, dt) {
     const mx = t.x + Math.cos(t.turret) * 20;
     const my = t.y + Math.sin(t.turret) * 20;
     myShells.push({ i: ++myShellSeq, x: mx, y: my,
-      vx: Math.cos(t.turret) * 5.6, vy: Math.sin(t.turret) * 5.6,
+      vx: Math.cos(t.turret) * 7.8, vy: Math.sin(t.turret) * 7.8,
       bounces: 2, grace: 160, life: 4200 });
     muzzleFx(mx, my, t.turret);
   }
