@@ -84,12 +84,14 @@ class Game {
     this.inputs = [{}, {}];
     this.events = [];
     this.bulletSeq = 0;
+    this.shells = [[], []]; // each player's self-simulated shells (positions only)
     this.newRound(false);
   }
 
   newRound(keepDomPoints) {
     this.grid = genMap(this.gm);
     this.bullets = [];
+    this.shells = [[], []];
     this.tanks = [0, 1].map(i => {
       const s = spawnPoint(i);
       return { id: i, x: s.x, y: s.y, angle: s.a, turret: s.a,
@@ -156,8 +158,6 @@ class Game {
       }
     }
 
-    t.cooldown -= dt;
-    if (c.fire && t.cooldown <= 0) this.fire(t);
   }
 
   fire(t) {
@@ -275,7 +275,6 @@ class Game {
       if (this.countdownT <= 0) this.state = 'play';
     } else if (this.state === 'play') {
       for (const t of this.tanks) this.updateTank(t, dt);
-      this.updateBullets(dt);
       if (this.gm === 'dom') {
         this.updateDom(dt);
         for (const i of [0, 1]) {
@@ -286,7 +285,6 @@ class Game {
         }
       }
     } else if (this.state === 'roundOver') {
-      this.updateBullets(dt);
       for (const i of [0, 1]) {
         const adv = !!(this.inputs[i] && this.inputs[i].adv);
         if (adv && !this.prevAdv[i]) {
@@ -316,9 +314,10 @@ class Game {
         a: +t.angle.toFixed(3), tu: +t.turret.toFixed(3),
         ty: t.type, hp: t.hp, al: t.alive ? 1 : 0
       })),
-      bl: this.bullets.map(b => ({
-        i: b.id, x: +b.x.toFixed(1), y: +b.y.toFixed(1), o: b.owner
-      })),
+      bl: [
+        ...this.shells[0].map(b => ({ i: '0-' + b.i, x: b.x, y: b.y, o: 0 })),
+        ...this.shells[1].map(b => ({ i: '1-' + b.i, x: b.x, y: b.y, o: 1 }))
+      ],
       ev: this.events.splice(0)
     };
   }
@@ -400,7 +399,27 @@ wss.on('connection', ws => {
       const room = rooms.get(ws.room);
       if (!room || !room.game) return;
       room.game.inputs[ws.idx] = m.k || {};
+      if (Array.isArray(m.sh)) room.game.shells[ws.idx] = m.sh.slice(0, 8);
       if (m.pt) room.pings[ws.idx] = m.pt;
+
+    } else if (m.t === 'hit') {
+      // shooter authority: the attacker's screen decided this hit landed
+      const room = rooms.get(ws.room);
+      if (!room || !room.game) return;
+      const g = room.game;
+      if (g.state !== 'play') return;
+      const tgt = g.tanks[m.tgt === 0 ? 0 : 1];
+      if (tgt && tgt.alive) g.damage(tgt);
+
+    } else if (m.t === 'brick') {
+      const room = rooms.get(ws.room);
+      if (!room || !room.game) return;
+      const g = room.game;
+      const c = m.c | 0, r = m.r | 0;
+      if (c > 0 && r > 0 && c < COLS - 1 && r < ROWS - 1 && g.grid[r][c] === 1) {
+        g.grid[r][c] = 0;
+        g.ev({ e: 'br', x: c * TILE + TILE / 2, y: r * TILE + TILE / 2 });
+      }
 
     } else if (m.t === 'cmd') {
       const room = rooms.get(ws.room);
