@@ -282,9 +282,13 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyN' && (state === 'play' || state === 'countdown')) askConfirm('newmap');
   if (e.code === 'KeyR' && state !== 'menu') askConfirm('reset');
   if ((e.code === 'Space' || e.code === 'KeyZ' || e.code === 'KeyX') && state === 'roundOver') {
-    if (localMatchOver) { scores = [0, 0]; round = 1; localMatchOver = false; }
-    else round++;
-    newRound(gameMode === 'dom');
+    if (localMatchOver) {
+      scores = [0, 0]; round = 1; localMatchOver = false;
+      newRound(); // fresh match: domination points reset too
+    } else {
+      round++;
+      newRound(gameMode === 'dom'); // mid-match round change keeps dom points
+    }
   }
 });
 addEventListener('keyup', e => {
@@ -727,6 +731,7 @@ function updateDom(dt) {
 }
 
 function domWin(i) {
+  localMatchOver = true; // rematch must start from zero
   lastWinner = i;
   state = 'roundOver';
   clearTimeout(overlayTimer);
