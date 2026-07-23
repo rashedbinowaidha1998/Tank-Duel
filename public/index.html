@@ -160,6 +160,7 @@
       <div class="btnrow" style="margin-bottom:14px">
         <button class="mini sel" id="pickDM">DEATHMATCH</button>
         <button class="mini" id="pickDom">DOMINATION · first to 100</button>
+        <button class="mini" id="pickCTF">CAPTURE FLAG · first to 100</button>
       </div>
       <div class="btnrow" id="menuBtns">
         <button class="accent1" id="btnBot">▸ VS BOT</button>
@@ -220,7 +221,9 @@ let mode = null;    // 'bot' | 'online'
 let countdownT = 0;
 let shake = 0, particles = [], bullets = [];
 let bulletSeq = 0;
-let myShells = [], myShellSeq = 0;      // online: shells I own and simulate myself
+let myShells = [], myShellSeq = 0;
+let localFlags = null;      // offline CTF flags
+let localMatchOver = false; // offline CTF: rematch resets scores      // online: shells I own and simulate myself
 const localBroken = new Map();          // bricks I broke locally, kept broken until the server agrees
 let overlayTimer = null;
 let lastWinner = 0;
@@ -279,8 +282,9 @@ addEventListener('keydown', e => {
   if (e.code === 'KeyN' && (state === 'play' || state === 'countdown')) askConfirm('newmap');
   if (e.code === 'KeyR' && state !== 'menu') askConfirm('reset');
   if ((e.code === 'Space' || e.code === 'KeyZ' || e.code === 'KeyX') && state === 'roundOver') {
-    round++;
-    newRound();
+    if (localMatchOver) { scores = [0, 0]; round = 1; localMatchOver = false; }
+    else round++;
+    newRound(gameMode === 'dom');
   }
 });
 addEventListener('keyup', e => {
@@ -631,6 +635,67 @@ function spawnPoint(i) {
     : { x: (COLS-3)*TILE + TILE/2, y: (ROWS-3)*TILE + TILE/2, a: Math.PI };
 }
 
+function updateCTFLocal(dt) {
+  const BASE_R = TILE * 1.3, TOUCH_R = T_RADIUS + 9;
+  for (let o = 0; o < 2; o++) {
+    const f = localFlags[o];
+    if (f.s === 1) { // carried: rides the carrier
+      const c = tanks[f.b];
+      if (!c || !c.alive) { f.s = 2; f.b = -1; f.dropT = 15000; }
+      else { f.x = c.x; f.y = c.y; }
+      continue;
+    }
+    if (f.s === 2) {
+      f.dropT -= dt;
+      if (f.dropT <= 0) {
+        const sp = spawnPoint(o);
+        f.s = 0; f.x = sp.x; f.y = sp.y;
+        addFloater(sp.x, sp.y - 18, 'FLAG RETURNED', tanks[o].color);
+        continue;
+      }
+    }
+    for (const t of tanks) {
+      if (!t.alive || t.id === o) continue; // only the enemy can grab it
+      if (Math.hypot(t.x - f.x, t.y - f.y) > TOUCH_R) continue;
+      f.s = 1; f.b = t.id; f.x = t.x; f.y = t.y;
+      addFloater(t.x, t.y - 18, 'FLAG TAKEN!', tanks[o].color);
+      sparks(t.x, t.y, tanks[o].color, 10);
+      break;
+    }
+  }
+  // deliveries
+  for (const t of tanks) {
+    if (!t.alive) continue;
+    const sp = spawnPoint(t.id);
+    if (Math.hypot(t.x - sp.x, t.y - sp.y) > BASE_R) continue;
+    const carried = localFlags.filter(f => f.s === 1 && f.b === t.id);
+    if (!carried.length) continue;
+    scores[t.id] += 10;
+    for (const f of carried) {
+      const o = localFlags.indexOf(f), so = spawnPoint(o);
+      f.s = 0; f.b = -1; f.x = so.x; f.y = so.y;
+    }
+    addFloater(sp.x, sp.y - 24, '+10', t.color);
+    sparks(sp.x, sp.y, t.color, 20);
+    shake = Math.max(shake, 5);
+    updateHUD();
+    if (scores[t.id] >= 100) { ctfWin(t.id); return; }
+  }
+}
+
+function ctfWin(i) {
+  localMatchOver = true;
+  lastWinner = i;
+  state = 'roundOver';
+  updateHUD();
+  clearTimeout(overlayTimer);
+  overlayTimer = setTimeout(() => {
+    if (state !== 'roundOver') return;
+    showOverlay(i === 0 ? 'YOU WIN THE MATCH' : 'THE BOT WINS THE MATCH',
+      '100 points! · Press SPACE, Z or X for a rematch', tanks[i].color);
+  }, 500);
+}
+
 function updateDom(dt) {
   const z = dom.zone;
   const inside = tanks.map(t => t.alive && Math.hypot(t.x - z.x, t.y - z.y) < z.r);
@@ -927,10 +992,18 @@ function lineOfSight(x0, y0, x1, y1) {
 function updateAI(t, dt) {
   const player = tanks[0];
   const inp = { fwd: false, back: false, left: false, right: false, fire: false };
-  if (!t.alive || (!player.alive && gameMode !== 'dom')) { t.aiInput = inp; return; }
+  if (!t.alive || (!player.alive && gameMode !== 'dom' && gameMode !== 'ctf')) { t.aiInput = inp; return; }
 
-  // where the bot wants to go: the player in deathmatch, the zone in domination
+  // where the bot wants to go: the player in deathmatch, the zone in domination,
+  // and in CTF: your flag -> its base, or hunting you down when you carry its colors
   let gx = player.x, gy = player.y, holdZone = false;
+  if (gameMode === 'ctf' && localFlags) {
+    const iCarry = localFlags[0].s === 1 && localFlags[0].b === 1;
+    const playerCarries = localFlags[1].s === 1 && localFlags[1].b === 0;
+    if (iCarry) { const sp = spawnPoint(1); gx = sp.x; gy = sp.y; }       // run it home
+    else if (playerCarries && player.alive) { gx = player.x; gy = player.y; } // hunt the thief
+    else { gx = localFlags[0].x; gy = localFlags[0].y; }                  // go steal
+  }
   if (gameMode === 'dom') {
     const z = dom.zone;
     gx = z.x; gy = z.y;
@@ -1045,14 +1118,14 @@ function updateBullets(dt) {
       if (t.id === b.owner && b.grace > 0) continue;
       if ((t.x-b.x)**2 + (t.y-b.y)**2 < (T_RADIUS+3)**2) {
         bullets.splice(i, 1);
-        damage(t);
+        damage(t, b.owner);
         break;
       }
     }
   }
 }
 
-function damage(t) {
+function damage(t, by) {
   t.hp--;
   updateHUD();
   sparks(t.x, t.y, t.color, 14);
@@ -1066,6 +1139,19 @@ function damage(t) {
     shake = 14;
     if (gameMode === 'dom') {
       dom.resp[t.id] = 2500; // respawn in 2.5s, match continues
+      return;
+    }
+    if (gameMode === 'ctf') {
+      for (const f of localFlags) {
+        if (f.s === 1 && f.b === t.id) { f.s = 2; f.b = -1; f.x = t.x; f.y = t.y; f.dropT = 15000; }
+      }
+      if (by != null && by !== t.id) {
+        scores[by] += 2;
+        addFloater(W/2, 40, '+2', tanks[by].color);
+        updateHUD();
+        if (scores[by] >= 100) { ctfWin(by); return; }
+      }
+      dom.resp[t.id] = 2500;
       return;
     }
     const winner = 1 - t.id;
@@ -1198,7 +1284,7 @@ function draw() {
   ctx.drawImage(floorCanvas, 0, 0);
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c]) drawTile(c, r);
   if (gameMode === 'dom') drawZone();
-  if (gameMode === 'ctf' && mode === 'online') drawCTF();
+  if (gameMode === 'ctf') drawCTF();
 
   for (const b of bullets) {
     ctx.beginPath();
@@ -1340,7 +1426,8 @@ function drawFlagIcon(x, y, color, alpha) {
 }
 
 function drawCTF() {
-  if (!net.flags) return;
+  const flags = mode === 'online' ? net.flags : localFlags;
+  if (!flags) return;
   // bases
   ctx.save();
   ctx.setLineDash([7, 6]);
@@ -1357,7 +1444,7 @@ function drawCTF() {
   ctx.restore();
   // flags
   const carriedIdx = {};
-  net.flags.forEach((f, o) => {
+  flags.forEach((f, o) => {
     const col = PCOLORS[o] ? PCOLORS[o][0] : '#fff';
     if (f.s === 1) {
       const c = tanks[f.b];
@@ -1475,6 +1562,9 @@ function newRound(keepDomPoints) {
   tanks[0].type = myType;
   tanks[1].type = mode === 'online' ? ((net.remoteInput && net.remoteInput.ty) || 'classic') : 'classic';
   tanks.forEach(t => t.turret = t.angle);
+  localFlags = gameMode === 'ctf'
+    ? [0, 1].map(i => { const sp = spawnPoint(i); return { s: 0, x: sp.x, y: sp.y, b: -1, dropT: 0 }; })
+    : null;
   bot.path = []; bot.repath = 0; bot.reverseT = 0; bot.stuckT = 0;
   bot.lastX = tanks[1].x; bot.lastY = tanks[1].y;
   state = 'countdown';
@@ -1555,7 +1645,11 @@ function updateHUD() {
     if (rl) rl.textContent = onlineRoundLabel();
     return;
   }
-  if (gameMode === 'dom') {
+  if (gameMode === 'ctf') {
+    document.getElementById('score1').textContent = Math.floor(scores[0]);
+    document.getElementById('score2').textContent = Math.floor(scores[1]);
+    document.getElementById('roundLabel').textContent = 'CAPTURE THE FLAG · FIRST TO 100';
+  } else if (gameMode === 'dom') {
     document.getElementById('score1').textContent = Math.floor(dom.pts[0]);
     document.getElementById('score2').textContent = Math.floor(dom.pts[1]);
     document.getElementById('roundLabel').textContent = 'DOMINATION · FIRST TO 100';
@@ -1592,15 +1686,23 @@ function setStatus(s) { document.getElementById('netStatus').textContent = s; }
 
 // ---------- MENU / NET UI ----------
 const $ = id => document.getElementById(id);
+$('pickCTF').onclick = () => {
+  gameMode = 'ctf';
+  $('pickCTF').classList.add('sel');
+  $('pickDM').classList.remove('sel');
+  $('pickDom').classList.remove('sel');
+};
 $('pickDM').onclick = () => {
   gameMode = 'dm';
   $('pickDM').classList.add('sel');
   $('pickDom').classList.remove('sel');
+  $('pickCTF').classList.remove('sel');
 };
 $('pickDom').onclick = () => {
   gameMode = 'dom';
   $('pickDom').classList.add('sel');
   $('pickDM').classList.remove('sel');
+  $('pickCTF').classList.remove('sel');
 };
 $('btnBot').onclick = () => {
   mode = 'bot';
@@ -1856,6 +1958,14 @@ function loopStep(now) {
       updateBullets(dt);
       if (gameMode === 'dom') {
         updateDom(dt);
+        for (const i of [0, 1]) {
+          if (!tanks[i].alive) {
+            dom.resp[i] -= dt;
+            if (dom.resp[i] <= 0) respawn(i);
+          }
+        }
+      } else if (gameMode === 'ctf') {
+        updateCTFLocal(dt);
         for (const i of [0, 1]) {
           if (!tanks[i].alive) {
             dom.resp[i] -= dt;
