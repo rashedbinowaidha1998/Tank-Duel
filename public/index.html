@@ -162,6 +162,11 @@
         <button class="mini" id="pickDom">DOMINATION · first to 100</button>
         <button class="mini" id="pickCTF">CAPTURE FLAG · first to 50</button>
       </div>
+      <div class="btnrow" id="dmSubRow" style="margin-bottom:14px">
+        <button class="mini sel" id="subLast">LAST STANDING</button>
+        <button class="mini" id="subFirst">FIRST KILL</button>
+        <button class="mini" id="subKills">KILL POINTS · first to 10</button>
+      </div>
       <div class="btnrow" id="menuBtns">
         <button class="accent1" id="btnBot">▸ VS BOT</button>
         <button class="accent2" id="btnOnline">▸ ONLINE VS FRIEND</button>
@@ -688,6 +693,19 @@ function updateCTFLocal(dt) {
   }
 }
 
+function killsWin(i) {
+  localMatchOver = true;
+  lastWinner = i;
+  state = 'roundOver';
+  updateHUD();
+  clearTimeout(overlayTimer);
+  overlayTimer = setTimeout(() => {
+    if (state !== 'roundOver') return;
+    showOverlay(i === 0 ? 'YOU WIN THE MATCH' : 'THE BOT WINS THE MATCH',
+      '10 kills! · Press SPACE, Z or X for a rematch', tanks[i].color);
+  }, 500);
+}
+
 function ctfWin(i) {
   localMatchOver = true;
   lastWinner = i;
@@ -1004,7 +1022,8 @@ function lineOfSight(x0, y0, x1, y1) {
 function updateAI(t, dt) {
   const player = tanks[0];
   const inp = { fwd: false, back: false, left: false, right: false, fire: false };
-  if (!t.alive || (!player.alive && gameMode !== 'dom' && gameMode !== 'ctf')) { t.aiInput = inp; return; }
+  const hasRespawns = gameMode === 'dom' || gameMode === 'ctf' || botSub === 'kills';
+  if (!t.alive || (!player.alive && !hasRespawns)) { t.aiInput = inp; return; }
 
   // where the bot wants to go: the player in deathmatch, the zone in domination,
   // and in CTF: your flag -> its base, or hunting you down when you carry its colors
@@ -1152,6 +1171,16 @@ function damage(t, by) {
     shake = 14;
     if (gameMode === 'dom') {
       dom.resp[t.id] = 2500; // respawn in 2.5s, match continues
+      return;
+    }
+    if (gameMode === 'dm' && botSub === 'kills' && mode === 'bot') {
+      if (by != null && by !== t.id) {
+        scores[by]++;
+        addFloater(W/2, 40, '+1 KILL', tanks[by].color);
+        updateHUD();
+        if (scores[by] >= 10) { killsWin(by); return; }
+      }
+      dom.resp[t.id] = 2500; // respawn, the hunt continues
       return;
     }
     if (gameMode === 'ctf') {
@@ -1688,7 +1717,8 @@ function updateHUD() {
   } else {
     document.getElementById('score1').textContent = scores[0];
     document.getElementById('score2').textContent = scores[1];
-    document.getElementById('roundLabel').textContent = 'ROUND ' + round;
+    document.getElementById('roundLabel').textContent =
+      (gameMode === 'dm' && botSub === 'kills' && mode === 'bot') ? 'FIRST TO 10 KILLS' : 'ROUND ' + round;
   }
   [0,1].forEach(i => {
     const el = document.getElementById('hp' + (i+1));
@@ -1718,23 +1748,36 @@ function setStatus(s) { document.getElementById('netStatus').textContent = s; }
 
 // ---------- MENU / NET UI ----------
 const $ = id => document.getElementById(id);
+let botSub = 'last'; // deathmatch ruleset vs the bot
+
 $('pickCTF').onclick = () => {
   gameMode = 'ctf';
   $('pickCTF').classList.add('sel');
   $('pickDM').classList.remove('sel');
   $('pickDom').classList.remove('sel');
+  $('dmSubRow').style.display = 'none';
 };
+const subBtns = ['subLast', 'subFirst', 'subKills'];
+const subVals = { subLast: 'last', subFirst: 'first', subKills: 'kills' };
+subBtns.forEach(id => {
+  $(id).onclick = () => {
+    botSub = subVals[id];
+    subBtns.forEach(b => $(b).classList.toggle('sel', b === id));
+  };
+});
 $('pickDM').onclick = () => {
   gameMode = 'dm';
   $('pickDM').classList.add('sel');
   $('pickDom').classList.remove('sel');
   $('pickCTF').classList.remove('sel');
+  $('dmSubRow').style.display = '';
 };
 $('pickDom').onclick = () => {
   gameMode = 'dom';
   $('pickDom').classList.add('sel');
   $('pickDM').classList.remove('sel');
   $('pickCTF').classList.remove('sel');
+  $('dmSubRow').style.display = 'none';
 };
 $('btnBot').onclick = () => {
   mode = 'bot';
@@ -1999,6 +2042,13 @@ function loopStep(now) {
         }
       } else if (gameMode === 'ctf') {
         updateCTFLocal(dt);
+        for (const i of [0, 1]) {
+          if (!tanks[i].alive) {
+            dom.resp[i] -= dt;
+            if (dom.resp[i] <= 0) respawn(i);
+          }
+        }
+      } else if (gameMode === 'dm' && botSub === 'kills') {
         for (const i of [0, 1]) {
           if (!tanks[i].alive) {
             dom.resp[i] -= dt;
