@@ -34,6 +34,16 @@ function spawnPoint(i) {
   return pts[i];
 }
 
+function eaglePoint(i) {
+  const pts = [
+    { x: 1*TILE + TILE/2, y: 1*TILE + TILE/2 },
+    { x: (COLS-2)*TILE + TILE/2, y: (ROWS-2)*TILE + TILE/2 },
+    { x: (COLS-2)*TILE + TILE/2, y: 1*TILE + TILE/2 },
+    { x: 1*TILE + TILE/2, y: (ROWS-2)*TILE + TILE/2 },
+  ];
+  return pts[i];
+}
+
 function genMap(gm) {
   const g = Array.from({length: ROWS}, () => Array(COLS).fill(0));
   for (let c = 0; c < COLS; c++) { g[0][c] = 2; g[ROWS-1][c] = 2; }
@@ -90,7 +100,7 @@ class Game {
     this.n = cfg.n;
     this.tm = !!cfg.tm;
     this.teams = cfg.teams.slice(0, this.n);
-    this.gm = ['dom','ctf'].includes(cfg.gm) ? cfg.gm : 'dm';
+    this.gm = ['dom','ctf','egl'].includes(cfg.gm) ? cfg.gm : 'dm';
     this.sub = ['last','kills'].includes(cfg.sub) ? cfg.sub : 'last';
     this.sideCount = this.tm ? 2 : this.n;
     this.ctfTarget = this.n * 25; // capture-the-flag win line: 25 points per player in the room
@@ -117,7 +127,7 @@ class Game {
     for (let i = 0; i < this.n; i++) if (this.side(i) === s) out.push(i);
     return out;
   }
-  respawnable() { return this.gm === 'dom' || this.gm === 'ctf' || this.sub === 'kills'; }
+  respawnable() { return this.gm === 'dom' || this.gm === 'ctf' || this.gm === 'egl' || this.sub === 'kills'; }
 
   newRound(keepDomPoints) {
     const prev = this.tanks || [];
@@ -127,7 +137,8 @@ class Game {
       const s = spawnPoint(i);
       const p = prev[i] || {};
       const t = { id: i, x: s.x, y: s.y, angle: s.a, turret: s.a,
-                  hp: 3, alive: !p.gone, gone: !!p.gone, type: p.type || 'gunner', inv: 0 };
+                  hp: 3, alive: !p.gone && !p.elim, gone: !!p.gone, elim: !!p.elim,
+                  type: p.type || 'gunner', inv: 0 };
       this.tanks.push(t);
     }
     this.shells = Array.from({ length: this.n }, () => []);
@@ -135,6 +146,9 @@ class Game {
     this.dom.owner = -1;
     this.resp = Array(this.n).fill(0);
     if (!keepDomPoints) this.dom.pts = Array(this.sideCount).fill(0);
+    this.eagles = this.gm === 'egl'
+      ? Array.from({ length: this.n }, (_, i) => ({ hp: 30, alive: true }))
+      : null;
     this.flags = this.gm === 'ctf'
       ? Array.from({ length: this.n }, (_, i) => {
           const sp = spawnPoint(i);
@@ -229,6 +243,21 @@ class Game {
     if (this.gm === 'dom') { this.resp[t.id] = 2500; return; }
 
     const enemyKill = by != null && this.side(by) !== this.side(t.id);
+
+    if (this.gm === 'egl') {
+      if (enemyKill) {
+        this.scores[by]++;
+        this.ev({ e: 'cp', w: this.side(by) });
+        if (this.sideScore(by) >= 10) {
+          this.winners = this.sideMembers(this.side(by));
+          this.matchOver = true;
+          this.enterRoundOver();
+          return;
+        }
+      }
+      if (!t.elim) this.resp[t.id] = 2500;
+      return;
+    }
 
     if (this.gm === 'ctf') {
       // the fallen drop everything they were carrying
@@ -388,7 +417,7 @@ class Game {
       if (this.gm === 'ctf') this.updateCTF(dt);
       if (this.respawnable()) {
         for (let i = 0; i < this.n; i++) {
-          if (!this.tanks[i].alive && !this.tanks[i].gone) {
+          if (!this.tanks[i].alive && !this.tanks[i].gone && !this.tanks[i].elim) {
             this.resp[i] -= dt;
             if (this.resp[i] <= 0) this.respawn(i);
           }
@@ -407,6 +436,29 @@ class Game {
     }
   }
 
+  eagleHit(owner, by) {
+    if (this.gm !== 'egl' || this.state !== 'play') return;
+    const e = this.eagles[owner];
+    const t = this.tanks[owner];
+    if (!e || !e.alive || !t || t.gone || t.elim) return;
+    if (this.side(owner) === this.side(by)) return; // friendly shells can't harm it
+    e.hp--;
+    const p = eaglePoint(owner);
+    this.ev({ e: 'eh', x: p.x | 0, y: p.y | 0, c: COLORS[owner] });
+    if (e.hp > 0) return;
+    e.alive = false;
+    t.elim = true;
+    if (t.alive) { t.alive = false; this.ev({ e: 'bm', x: t.x | 0, y: t.y | 0, c: COLORS[owner] }); }
+    this.ev({ e: 'ebm', x: p.x | 0, y: p.y | 0, c: COLORS[owner], w: owner });
+    // last side standing?
+    const sidesLeft = new Set(this.tanks.filter(x => !x.gone && !x.elim).map(x => this.side(x.id)));
+    if (sidesLeft.size <= 1) {
+      this.winners = sidesLeft.size === 1 ? this.sideMembers([...sidesLeft][0]) : [];
+      this.matchOver = true;
+      this.enterRoundOver();
+    }
+  }
+
   playerLeft(i) {
     const t = this.tanks[i];
     if (!t) return;
@@ -416,6 +468,15 @@ class Game {
       this.ev({ e: 'bm', x: t.x | 0, y: t.y | 0, c: COLORS[i] });
     }
     // does the round resolve now?
+    if (this.state === 'play' && this.gm === 'egl') {
+      const sidesLeft = new Set(this.tanks.filter(x => !x.gone && !x.elim).map(x => this.side(x.id)));
+      if (sidesLeft.size <= 1) {
+        this.winners = sidesLeft.size === 1 ? this.sideMembers([...sidesLeft][0]) : [];
+        this.matchOver = true;
+        this.enterRoundOver();
+        return;
+      }
+    }
     if (this.state === 'play' && this.gm === 'dm' && this.sub !== 'kills') {
       const aliveSides = new Set(this.tanks.filter(x => x.alive && !x.gone).map(x => this.side(x.id)));
       if (aliveSides.size === 1) {
@@ -443,12 +504,13 @@ class Game {
         : null,
       rs: this.resp.map(x => Math.max(0, x | 0)),
       fg: this.gm === 'ctf' ? this.flags.map(f => ({ s: f.st, x: f.x | 0, y: f.y | 0, b: f.by })) : null,
+      eg: this.gm === 'egl' ? this.eagles.map(e => ({ h: e.hp, a: e.alive ? 1 : 0 })) : null,
       g: this.grid.flat().join(''),
       tk: this.tanks.map(t => ({
         x: +t.x.toFixed(1), y: +t.y.toFixed(1),
         a: +t.angle.toFixed(3), tu: +t.turret.toFixed(3),
         ty: t.type, hp: t.hp, al: t.alive ? 1 : 0, gn: t.gone ? 1 : 0,
-        am: this.ammoRep[t.id], iv: t.inv > 0 ? (t.inv | 0) : 0
+        am: this.ammoRep[t.id], iv: t.inv > 0 ? (t.inv | 0) : 0, el: t.elim ? 1 : 0
       })),
       bl,
       ev: this.events.splice(0)
@@ -537,7 +599,7 @@ wss.on('connection', ws => {
       const code = genCode();
       rooms.set(code, {
         code, clients: [ws], names: ['Player 1'], teams: [0],
-        set: { gm: ['dm','dom','ctf'].includes(m.gm) ? m.gm : 'dm', sub: 'last', tm: false },
+        set: { gm: ['dm','dom','ctf','egl'].includes(m.gm) ? m.gm : 'dm', sub: 'last', tm: false },
         started: false, game: null, timer: null, pings: [0,0,0,0], q: 0
       });
       ws.room = code; ws.idx = 0;
@@ -575,7 +637,7 @@ wss.on('connection', ws => {
 
     } else if (m.t === 'set') {
       if (!room || room.started || ws.idx !== 0) return;
-      if (m.k === 'gm' && ['dm','dom','ctf'].includes(m.v)) room.set.gm = m.v;
+      if (m.k === 'gm' && ['dm','dom','ctf','egl'].includes(m.v)) room.set.gm = m.v;
       if (m.k === 'sub' && ['last','kills'].includes(m.v)) room.set.sub = m.v;
       if (m.k === 'tm') {
         room.set.tm = !!m.v;
@@ -616,6 +678,10 @@ wss.on('connection', ws => {
       if (!room || !room.game || ws.idx !== 0) return;
       if (m.c === 'newmap') room.game.newRound(room.game.gm === 'dom');
       else if (m.c === 'reset') room.game.freshMatch();
+
+    } else if (m.t === 'eagle') {
+      if (!room || !room.game) return;
+      room.game.eagleHit(m.tgt | 0, ws.idx);
 
     } else if (m.t === 'brick') {
       if (!room || !room.game) return;
