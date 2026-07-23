@@ -345,13 +345,8 @@ class Game {
         if (!t.alive || t.gone) continue;
         if (Math.hypot(t.x - f.x, t.y - f.y) > TOUCH_R) continue;
         if (this.side(t.id) === this.side(o)) {
-          if (f.st === 2) { // friendly touch returns a dropped flag
-            const sp = spawnPoint(o);
-            f.st = 0; f.x = sp.x; f.y = sp.y;
-            this.ev({ e: 'fr', x: sp.x | 0, y: sp.y | 0, c: COLORS[o] });
-            break;
-          }
-          // friendly touch on a home flag: nothing — keep scanning for enemies
+          // your own (or a teammate's) flag: touching it does nothing —
+          // a dropped flag stays on the field until stolen again or the 15s timer flies it home
         } else { // touched by an enemy: stolen
           f.st = 1; f.by = t.id; f.x = t.x; f.y = t.y;
           this.ev({ e: 'fg', x: t.x | 0, y: t.y | 0, c: COLORS[o] });
