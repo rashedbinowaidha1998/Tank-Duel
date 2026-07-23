@@ -98,6 +98,7 @@ class Game {
     this.winners = [];
     this.matchOver = false;
     this.inputs = Array.from({ length: this.n }, () => ({}));
+    this.ammoRep = Array(this.n).fill(5); // each player's self-reported magazine
     this.shells = Array.from({ length: this.n }, () => []);
     this.events = [];
     this.dom = { pts: Array(this.sideCount).fill(0), cap: Array(this.sideCount).fill(0),
@@ -357,7 +358,8 @@ class Game {
       tk: this.tanks.map(t => ({
         x: +t.x.toFixed(1), y: +t.y.toFixed(1),
         a: +t.angle.toFixed(3), tu: +t.turret.toFixed(3),
-        ty: t.type, hp: t.hp, al: t.alive ? 1 : 0, gn: t.gone ? 1 : 0
+        ty: t.type, hp: t.hp, al: t.alive ? 1 : 0, gn: t.gone ? 1 : 0,
+        am: this.ammoRep[t.id]
       })),
       bl,
       ev: this.events.splice(0)
@@ -504,6 +506,7 @@ wss.on('connection', ws => {
     } else if (m.t === 'input') {
       if (!room || !room.game) return;
       room.game.inputs[ws.idx] = m.k || {};
+      if (typeof m.am === 'number') room.game.ammoRep[ws.idx] = Math.max(0, Math.min(5, m.am));
       if (Array.isArray(m.sh)) room.game.shells[ws.idx] = m.sh.slice(0, 8);
       if (m.pt) room.pings[ws.idx] = m.pt;
 
