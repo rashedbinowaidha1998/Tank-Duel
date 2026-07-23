@@ -10,14 +10,17 @@ const PORT = process.env.PORT || 3000;
 const html = fs.readFileSync(path.join(__dirname, 'public', 'index.html'));
 
 const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+  res.writeHead(200, {
+    'Content-Type': 'text/html; charset=utf-8',
+    'Cache-Control': 'no-store' // browsers always fetch the fresh game — no hard-refresh needed
+  });
   res.end(html);
 });
 
 // ---------- GAME CONSTANTS (mirror the client exactly) ----------
 const TILE = 32, COLS = 28, ROWS = 18;
 const W = COLS * TILE, H = ROWS * TILE;
-const T_RADIUS = 13, T_SPEED = 2.3, T_TURN = 0.052, T_TURRET = 0.07;
+const T_RADIUS = 13, T_SPEED = 3.2, T_TURN = 0.065, T_TURRET = 0.088; // ~1.4x tuned (must match client)
 const COLORS = ['#ffa62e', '#3ed6c0'];
 
 function spawnPoint(i) {
@@ -168,7 +171,7 @@ class Game {
     this.bullets.push({
       id: ++this.bulletSeq,
       x: mx, y: my,
-      vx: Math.cos(t.turret) * 5.6, vy: Math.sin(t.turret) * 5.6,
+      vx: Math.cos(t.turret) * 7.8, vy: Math.sin(t.turret) * 7.8,
       owner: t.id, bounces: 2, grace: 160, life: 4200
     });
     this.ev({ e: 'mz', x: mx | 0, y: my | 0, a: +t.turret.toFixed(2), o: t.id });
