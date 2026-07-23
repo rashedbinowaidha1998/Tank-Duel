@@ -386,82 +386,6 @@ async function guestJoin(code) {
 
 // guest-side prediction: run our own tank's movement locally with the same
 // physics the host uses, so steering feels instant instead of waiting a round trip
-let myBullets = []; // guest's locally predicted shells (visual; host stays authoritative for damage)
-
-function predictOwnTank(t, dt) {
-  const c = localInput();
-  if (c.left) { t.angle -= T_TURN; if (t.type === 'gunner') t.turret -= T_TURN; }
-  if (c.right) { t.angle += T_TURN; if (t.type === 'gunner') t.turret += T_TURN; }
-  if (t.type === 'gunner') {
-    if (c.tl) t.turret -= T_TURRET;
-    if (c.tr) t.turret += T_TURRET;
-  } else {
-    t.turret = t.angle;
-  }
-  let v = 0;
-  if (c.fwd) v = T_SPEED;
-  if (c.back) v = -T_SPEED * 0.62;
-  if (v !== 0) t.treadPhase += Math.abs(v) * 0.25;
-  const nx = t.x + Math.cos(t.angle) * v;
-  const ny = t.y + Math.sin(t.angle) * v;
-  if (!circleHitsWall(nx, t.y, T_RADIUS)) t.x = nx;
-  if (!circleHitsWall(t.x, ny, T_RADIUS)) t.y = ny;
-  const other = tanks[1 - t.id];
-  if (other.alive) {
-    const dx = t.x - other.x, dy = t.y - other.y;
-    const d = Math.hypot(dx, dy);
-    if (d > 0 && d < T_RADIUS * 2) {
-      const push = (T_RADIUS*2 - d) / 2;
-      const px = dx/d * push, py = dy/d * push;
-      if (!circleHitsWall(t.x + px, t.y + py, T_RADIUS)) { t.x += px; t.y += py; }
-    }
-  }
-  // instant local firing (the host confirms damage; we show the shell immediately)
-  t.cooldown -= dt;
-  t.recoil = Math.max(0, t.recoil - dt * 0.06);
-  if (c.fire && t.cooldown <= 0 && myBullets.length < 4) {
-    t.cooldown = 380;
-    t.recoil = 5;
-    const mx = t.x + Math.cos(t.turret) * 20;
-    const my = t.y + Math.sin(t.turret) * 20;
-    myBullets.push({ x: mx, y: my, vx: Math.cos(t.turret) * 5.6, vy: Math.sin(t.turret) * 5.6,
-                     bounces: 2, life: 4200 });
-    muzzleFx(mx, my, t.turret);
-  }
-}
-
-// predicted shells: movement + bounces + purely visual impacts
-function updateMyBullets(dt) {
-  for (let i = myBullets.length - 1; i >= 0; i--) {
-    const b = myBullets[i];
-    b.life -= dt;
-    if (b.life <= 0) { myBullets.splice(i, 1); continue; }
-    let removed = false;
-    for (let s = 0; s < 2 && !removed; s++) {
-      const nx = b.x + b.vx / 2, ny = b.y + b.vy / 2;
-      const hit = solidAt(nx, ny);
-      if (hit === 1) { // brick: show debris now, the host removes the tile a beat later
-        brickDebris(Math.floor(nx/TILE)*TILE + TILE/2, Math.floor(ny/TILE)*TILE + TILE/2);
-        myBullets.splice(i, 1); removed = true; break;
-      }
-      if (hit === 2) {
-        if (b.bounces <= 0) { sparks(b.x, b.y, '#cfd6dd'); myBullets.splice(i, 1); removed = true; break; }
-        b.bounces--;
-        const hx = solidAt(b.x + b.vx / 2, b.y) !== 0;
-        const hy = solidAt(b.x, b.y + b.vy / 2) !== 0;
-        if (hx) b.vx = -b.vx;
-        if (hy) b.vy = -b.vy;
-        if (!hx && !hy) { b.vx = -b.vx; b.vy = -b.vy; }
-        sparks(b.x, b.y, '#e8ecf0');
-      } else if (hit === 0) { b.x = nx; b.y = ny; }
-    }
-    if (removed) continue;
-    // visual impact on the opponent (host decides the real damage)
-    const foe = tanks[1 - net.idx];
-    if (foe.alive && (foe.x-b.x)**2 + (foe.y-b.y)**2 < (T_RADIUS+3)**2) myBullets.splice(i, 1);
-  }
-}
-
 function startOnlineGame() {
   mode = 'online';
   scores = net.roster.map(() => 0);
@@ -629,6 +553,7 @@ function applySnapshot(m) {
   m.tk.forEach((s, i) => {
     const t = tanks[i];
     if (!t) return;
+    if (i === net.idx && !t.alive && s.al) t.ammo = 5; // fresh spawn, fresh magazine
     t.type = s.ty; t.hp = s.hp; t.alive = !!s.al; t.gone = !!s.gn;
     if (i === net.idx) { t.sx = s.x; t.sy = s.y; t.sa = s.a; t.stu = s.tu; }
   });
@@ -671,6 +596,7 @@ function applySnapshot(m) {
     net.snapBuf.length = 0;
     myShells = [];
     localBroken.clear();
+    if (tanks[net.idx]) tanks[net.idx].ammo = 5;
   }
   if (state !== 'roundOver' && state !== 'menu') { clearTimeout(overlayTimer); hideOverlay(); }
 }
@@ -834,11 +760,11 @@ function makeFloor() {
 function makeTank(id, x, y, angle, color, dark) {
   return { id, x, y, angle, color, dark, hp: 3, speed: 0, cooldown: 0, alive: true,
            recoil: 0, treadPhase: 0, nx: x, ny: y, na: angle,
-           turret: angle, ntu: angle, type: 'gunner' };
+           turret: angle, ntu: angle, type: 'gunner', ammo: 5 };
 }
 let tanks = [];
 
-const T_RADIUS = 13, T_SPEED = 3.2, T_TURN = 0.065, T_TURRET = 0.088; // ~1.4x tuned
+const T_RADIUS = 13, T_SPEED = 4.0, T_TURN = 0.075, T_TURRET = 0.10; // fast & furious
 
 function controls(t) {
   // bot mode only; online simulation lives on the server
@@ -898,6 +824,7 @@ function updateTank(t, dt) {
     }
   }
 
+  t.ammo = Math.min(5, (t.ammo == null ? 5 : t.ammo) + dt / 1000); // +1 shell per second
   t.cooldown -= dt;
   t.recoil = Math.max(0, t.recoil - dt * 0.06);
   if (c.fire && t.cooldown <= 0) fire(t);
@@ -912,17 +839,16 @@ function muzzleFx(x, y, angle) {
 }
 
 function fire(t) {
-  const myBullets = bullets.filter(b => b.owner === t.id).length;
-  if (myBullets >= 4) return;
-  const isBot = mode === 'bot' && t.id === 1;
-  t.cooldown = isBot ? 540 : 380;
+  if (t.ammo < 1) return;
+  t.ammo--;
+  t.cooldown = 500;
   t.recoil = 5;
   const mx = t.x + Math.cos(t.turret) * 20;
   const my = t.y + Math.sin(t.turret) * 20;
   bullets.push({
     id: ++bulletSeq,
     x: mx, y: my,
-    vx: Math.cos(t.turret) * 7.8, vy: Math.sin(t.turret) * 7.8,
+    vx: Math.cos(t.turret) * 9.8, vy: Math.sin(t.turret) * 9.8,
     owner: t.id, bounces: 2, grace: 160, life: 4200
   });
   muzzleFx(mx, my, t.turret);
@@ -1341,6 +1267,30 @@ function draw() {
   }
   ctx.globalAlpha = 1;
   ctx.restore();
+  drawAmmo();
+}
+
+function drawAmmo() {
+  const me = mode === 'online' ? tanks[net.idx] : (mode === 'bot' ? tanks[0] : null);
+  if (!me || me.ammo == null || state === 'menu') return;
+  const total = 5, slotW = 16, gap = 6;
+  const x0 = W/2 - (total*slotW + (total-1)*gap)/2, y = H - 15;
+  const full = Math.floor(me.ammo);
+  const frac = me.ammo - full;
+  for (let i = 0; i < total; i++) {
+    const x = x0 + i*(slotW + gap);
+    ctx.fillStyle = 'rgba(0,0,0,.4)';
+    ctx.fillRect(x - 1, y - 1, slotW + 2, 8);
+    if (i < full) {
+      ctx.fillStyle = me.color;
+      ctx.fillRect(x, y, slotW, 6);
+    } else if (i === full && frac > 0.03) {
+      ctx.fillStyle = me.color;
+      ctx.globalAlpha = 0.45;
+      ctx.fillRect(x, y, slotW * frac, 6); // the next shell, reloading
+      ctx.globalAlpha = 1;
+    }
+  }
 }
 
 function sideRGB(sIdx) {
@@ -1647,16 +1597,19 @@ function predictOwnTank(t, dt) {
       if (!circleHitsWall(t.x + dx/d*push, t.y + dy/d*push, T_RADIUS)) { t.x += dx/d*push; t.y += dy/d*push; }
     }
   }
-  // shooter authority: my shells spawn instantly, on my screen, the moment I fire
+  // shooter authority: my shells spawn instantly, on my screen, the moment I fire.
+  // magazine: 5 shells max, one shot per 0.5s, regenerating 1 shell per second
+  t.ammo = Math.min(5, t.ammo + dt / 1000);
   t.cooldown -= dt;
   t.recoil = Math.max(0, t.recoil - dt * 0.06);
-  if (c.fire && t.cooldown <= 0 && myShells.length < 4) {
-    t.cooldown = 380;
+  if (c.fire && t.cooldown <= 0 && t.ammo >= 1) {
+    t.ammo--;
+    t.cooldown = 500;
     t.recoil = 5;
     const mx = t.x + Math.cos(t.turret) * 20;
     const my = t.y + Math.sin(t.turret) * 20;
     myShells.push({ i: ++myShellSeq, x: mx, y: my,
-      vx: Math.cos(t.turret) * 7.8, vy: Math.sin(t.turret) * 7.8,
+      vx: Math.cos(t.turret) * 9.8, vy: Math.sin(t.turret) * 9.8,
       bounces: 2, grace: 160, life: 4200 });
     muzzleFx(mx, my, t.turret);
   }
