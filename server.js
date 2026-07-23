@@ -413,7 +413,7 @@ function startRoom(room) {
     const dt = Math.min(50, now - last);
     last = now;
     room.game.tick(dt);
-    if (++sendToggle % 2 === 0) {
+    { // 60 snapshots/sec — your server and ping can afford the royal treatment
       const base = room.game.makeSnap(++room.q);
       room.clients.forEach((ws, i) => {
         if (ws && ws.readyState === 1) {
