@@ -484,6 +484,7 @@ function showLobby() {
   g1.append(mkLabel('MODE'));
   g1.append(mkBtn('DEATHMATCH', L.set.gm === 'dm', () => netSendRaw({ t: 'set', k: 'gm', v: 'dm' })));
   g1.append(mkBtn('DOMINATION', L.set.gm === 'dom', () => netSendRaw({ t: 'set', k: 'gm', v: 'dom' })));
+  g1.append(mkBtn('CAPTURE FLAG', L.set.gm === 'ctf', () => netSendRaw({ t: 'set', k: 'gm', v: 'ctf' })));
   set.append(g1);
   if (L.set.gm === 'dm') {
     const g2 = document.createElement('div'); g2.className = 'sgroup';
@@ -541,6 +542,7 @@ function applySnapshot(m) {
     }
   }
   if (m.dm) { net.domP = m.dm.p; net.domC = m.dm.c; net.domO = m.dm.o; }
+  net.flags = m.fg || null;
   for (let r = 0; r < ROWS; r++)
     for (let c = 0; c < COLS; c++)
       grid[r][c] = +m.g[r * COLS + c];
@@ -565,6 +567,25 @@ function applySnapshot(m) {
     else if (e.e === 'bm') explode(e.x, e.y, e.c);
     else if (e.e === 'mz') muzzleFx(e.x, e.y, e.a);
     else if (e.e === 'sh') shake = Math.max(shake, e.v);
+    else if (e.e === 'fg') {
+      addFloater(e.x, e.y - 18, 'FLAG TAKEN!', e.c);
+      sparks(e.x, e.y, e.c, 10);
+    }
+    else if (e.e === 'fr') {
+      addFloater(e.x, e.y - 18, 'FLAG RETURNED', e.c);
+    }
+    else if (e.e === 'fd') {
+      sparks(e.x, e.y, '#c8b98a', 8);
+    }
+    else if (e.e === 'kp') {
+      addFloater(W/2, 40, '+2', PCOLORS[e.w] ? PCOLORS[e.w][0] : '#fff');
+    }
+    else if (e.e === 'cap2') {
+      const txt = e.k === 1 ? '+10' : e.k === 2 ? '+30 DOUBLE!' : '+90 TRIPLE!!';
+      addFloater(e.x, e.y - 24, txt, PCOLORS[e.w] ? PCOLORS[e.w][0] : '#fff');
+      sparks(e.x, e.y, PCOLORS[e.w] ? PCOLORS[e.w][0] : '#fff', 20);
+      shake = Math.max(shake, e.k * 3);
+    }
     else if (e.e === 'cp') {
       const col = (mode === 'online') ? sideHex(e.w) : (e.w === 0 ? '#ffa62e' : '#3ed6c0');
       const txt = (mode === 'online' && gameMode === 'dm') ? '+1 KILL' : 'CAPTURED!';
@@ -1177,6 +1198,7 @@ function draw() {
   ctx.drawImage(floorCanvas, 0, 0);
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c]) drawTile(c, r);
   if (gameMode === 'dom') drawZone();
+  if (gameMode === 'ctf' && mode === 'online') drawCTF();
 
   for (const b of bullets) {
     ctx.beginPath();
@@ -1270,7 +1292,7 @@ function draw() {
   // respawn countdowns over the spawn points (domination & kill-points modes)
   if (state === 'play') {
     const respArr = (mode === 'online') ? net.domResp : dom.resp;
-    const canResp = gameMode === 'dom' || (mode === 'online' && net.sub === 'kills');
+    const canResp = gameMode === 'dom' || gameMode === 'ctf' || (mode === 'online' && net.sub === 'kills');
     if (canResp && respArr) {
       for (let i = 0; i < tanks.length; i++) {
         if (!tanks[i].alive && !tanks[i].gone && respArr[i] > 0) {
@@ -1299,6 +1321,55 @@ function draw() {
   ctx.globalAlpha = 1;
   ctx.restore();
   drawAmmo();
+}
+
+function drawFlagIcon(x, y, color, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha == null ? 1 : alpha;
+  ctx.strokeStyle = '#2b2f24';
+  ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x, y + 9); ctx.lineTo(x, y - 11); ctx.stroke();
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.moveTo(x, y - 11); ctx.lineTo(x + 13, y - 6.5); ctx.lineTo(x, y - 2);
+  ctx.closePath(); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.35)';
+  ctx.lineWidth = 1;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawCTF() {
+  if (!net.flags) return;
+  // bases
+  ctx.save();
+  ctx.setLineDash([7, 6]);
+  ctx.lineWidth = 2;
+  for (let i = 0; i < tanks.length; i++) {
+    if (!tanks[i] || tanks[i].gone) continue;
+    const sp = spawnPoint(i);
+    ctx.globalAlpha = 0.45;
+    ctx.strokeStyle = PCOLORS[i][0];
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, TILE * 1.3, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  ctx.restore();
+  // flags
+  const carriedIdx = {};
+  net.flags.forEach((f, o) => {
+    const col = PCOLORS[o] ? PCOLORS[o][0] : '#fff';
+    if (f.s === 1) {
+      const c = tanks[f.b];
+      if (!c) return;
+      const k = carriedIdx[f.b] || 0;
+      carriedIdx[f.b] = k + 1;
+      drawFlagIcon(c.x + 13 + k * 5, c.y - 4 - k * 7, col);
+    } else {
+      const blink = f.s === 2 ? (0.55 + 0.4 * Math.sin(performance.now() / 170)) : 1;
+      drawFlagIcon(f.x, f.y, col, blink);
+    }
+  });
 }
 
 function drawAmmo() {
@@ -1451,6 +1522,7 @@ function buildHUD() {
 }
 
 function onlineRoundLabel() {
+  if (gameMode === 'ctf') return 'CAPTURE THE FLAG · FIRST TO 100';
   if (gameMode === 'dom') return 'DOMINATION · FIRST TO 100';
   if (net.sub === 'first') return 'FIRST KILL WINS · ROUND ' + round;
   if (net.sub === 'kills') return 'FIRST TO 10 KILLS';
