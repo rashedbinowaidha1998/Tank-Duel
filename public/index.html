@@ -164,7 +164,6 @@
       </div>
       <div class="btnrow" id="dmSubRow" style="margin-bottom:14px">
         <button class="mini sel" id="subLast">LAST STANDING</button>
-        <button class="mini" id="subFirst">FIRST KILL</button>
         <button class="mini" id="subKills">KILL POINTS · first to 10</button>
       </div>
       <div class="btnrow" id="menuBtns">
@@ -503,7 +502,6 @@ function showLobby() {
     const g2 = document.createElement('div'); g2.className = 'sgroup';
     g2.append(mkLabel('RULES'));
     g2.append(mkBtn('LAST STANDING', L.set.sub === 'last', () => netSendRaw({ t: 'set', k: 'sub', v: 'last' })));
-    g2.append(mkBtn('FIRST KILL', L.set.sub === 'first', () => netSendRaw({ t: 'set', k: 'sub', v: 'first' })));
     g2.append(mkBtn('KILL POINTS', L.set.sub === 'kills', () => netSendRaw({ t: 'set', k: 'sub', v: 'kills' })));
     set.append(g2);
   }
@@ -1675,7 +1673,6 @@ function buildHUD() {
 function onlineRoundLabel() {
   if (gameMode === 'ctf') return 'CAPTURE THE FLAG · FIRST TO ' + (net.roster ? net.roster.length * 25 : 100);
   if (gameMode === 'dom') return 'DOMINATION · FIRST TO 100';
-  if (net.sub === 'first') return 'FIRST KILL WINS · ROUND ' + round;
   if (net.sub === 'kills') return 'FIRST TO 10 KILLS';
   return 'LAST TANK STANDING · ROUND ' + round;
 }
@@ -1757,8 +1754,8 @@ $('pickCTF').onclick = () => {
   $('pickDom').classList.remove('sel');
   $('dmSubRow').style.display = 'none';
 };
-const subBtns = ['subLast', 'subFirst', 'subKills'];
-const subVals = { subLast: 'last', subFirst: 'first', subKills: 'kills' };
+const subBtns = ['subLast', 'subKills'];
+const subVals = { subLast: 'last', subKills: 'kills' };
 subBtns.forEach(id => {
   $(id).onclick = () => {
     botSub = subVals[id];
