@@ -156,11 +156,6 @@
     <div class="big" id="ovTitle">TANK DUEL</div>
     <div class="small" id="ovSub">Choose your battle</div>
     <div id="menuArea">
-      <div class="small" style="margin-bottom:6px">— CHOOSE YOUR TANK —</div>
-      <div class="btnrow" style="margin-bottom:14px">
-        <button class="mini sel" id="pickClassic">CLASSIC · fire <u>SPACE</u></button>
-        <button class="mini" id="pickGunner">GUNNER · fire <u>SPACE</u> · turret <u>Z</u>/<u>X</u></button>
-      </div>
       <div class="small" style="margin-bottom:6px">— CHOOSE GAME MODE —</div>
       <div class="btnrow" style="margin-bottom:14px">
         <button class="mini sel" id="pickDM">DEATHMATCH</button>
@@ -205,7 +200,7 @@
 
 <div class="controls">
   <div class="c1"><b>MOVE</b> — <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></div>
-  <div class="c2"><b>FIRE</b> — <kbd>Space</kbd> · <b>GUNNER TURRET</b> — <kbd>Z</kbd>/<kbd>X</kbd></div>
+  <div class="c2"><b>FIRE</b> — <kbd>Space</kbd> · <b>TURRET</b> — <kbd>Z</kbd> left / <kbd>X</kbd> right</div>
   <div><b>N</b> new map · <b>R</b> reset score (host only · <b>Z</b> confirm / <b>X</b> cancel) · <b>Space</b>/<b>Z</b>/<b>X</b> next round</div>
 </div>
 <div class="meta">EVERY ROUND GENERATES A NEW SYMMETRIC BATTLEFIELD · BULLETS RICOCHET OFF STEEL · BRICK IS DESTRUCTIBLE</div>
@@ -293,7 +288,7 @@ addEventListener('keyup', e => {
   if (mode === 'online' && net.connected) sendInput();
 });
 
-let myType = 'classic'; // 'classic' | 'gunner'
+const myType = 'gunner'; // the one true tank: turret on Z/X, fire on Space
 
 function localInput() {
   if (pendingConfirm) return { fwd: false, back: false, left: false, right: false,
@@ -304,14 +299,9 @@ function localInput() {
     adv: !!(keys['Space'] || keys['KeyZ'] || keys['KeyX']),
     ty: myType
   };
-  if (myType === 'gunner') {
-    inp.fire = keys['Space'];
-    inp.tl = keys['KeyZ'];   // rotate cannon left
-    inp.tr = keys['KeyX'];   // rotate cannon right
-  } else {
-    inp.fire = keys['Space'];
-    inp.tl = false; inp.tr = false;
-  }
+  inp.fire = keys['Space'];
+  inp.tl = keys['KeyZ'];   // rotate cannon left
+  inp.tr = keys['KeyX'];   // rotate cannon right
   return inp;
 }
 
@@ -844,7 +834,7 @@ function makeFloor() {
 function makeTank(id, x, y, angle, color, dark) {
   return { id, x, y, angle, color, dark, hp: 3, speed: 0, cooldown: 0, alive: true,
            recoil: 0, treadPhase: 0, nx: x, ny: y, na: angle,
-           turret: angle, ntu: angle, type: 'classic' };
+           turret: angle, ntu: angle, type: 'gunner' };
 }
 let tanks = [];
 
@@ -1549,18 +1539,6 @@ function setStatus(s) { document.getElementById('netStatus').textContent = s; }
 
 // ---------- MENU / NET UI ----------
 const $ = id => document.getElementById(id);
-$('pickClassic').onclick = () => {
-  myType = 'classic';
-  $('pickClassic').classList.add('sel');
-  $('pickGunner').classList.remove('sel');
-  if (tanks[0]) tanks[0].type = myType; // applies live if already playing
-};
-$('pickGunner').onclick = () => {
-  myType = 'gunner';
-  $('pickGunner').classList.add('sel');
-  $('pickClassic').classList.remove('sel');
-  if (tanks[0]) tanks[0].type = myType;
-};
 $('pickDM').onclick = () => {
   gameMode = 'dm';
   $('pickDM').classList.add('sel');
