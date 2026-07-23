@@ -78,6 +78,24 @@
   button.mini{padding:5px 12px; font-size:11px}
   #netPanel{display:none; flex-direction:column; gap:8px; align-items:center; width:100%; max-width:520px}
   #netPanel.show{display:flex}
+  #lobbyPanel{display:none; flex-direction:column; gap:10px; align-items:center; width:100%; max-width:520px}
+  #lobbyPanel.show{display:flex}
+  #lobbyList{display:flex; flex-direction:column; gap:6px; width:100%}
+  .lrow{display:flex; align-items:center; gap:10px; width:100%; background:var(--panel);
+        border:1px solid var(--line); border-radius:4px; padding:6px 12px;
+        font-family:"Courier New", monospace; font-size:14px}
+  .ldot{width:14px; height:14px; border-radius:3px; flex:none}
+  .lname{flex:1; text-align:left; letter-spacing:.06em}
+  .lname input{background:#0d1207; color:var(--text); border:1px solid var(--line);
+               border-radius:3px; padding:3px 8px; font-family:inherit; font-size:13px; width:150px}
+  .lhost{font-size:10px; opacity:.6; letter-spacing:.2em}
+  .lteam{padding:2px 12px; border-radius:3px; font-weight:900; border:1px solid var(--line); flex:none}
+  .lteam.t0{color:#ffa62e} .lteam.t1{color:#3ed6c0}
+  .lteam.clickable{cursor:pointer}
+  .lteam.clickable:hover{background:#2c3619}
+  #lobbySet{display:flex; gap:8px; flex-wrap:wrap; justify-content:center; font-family:"Courier New", monospace; font-size:12px}
+  #lobbySet .sgroup{display:flex; gap:4px; align-items:center}
+  #lobbySet .slabel{opacity:.6; letter-spacing:.15em; font-size:10px}
   .netstep{width:100%; text-align:left; font-size:12px; letter-spacing:.08em; opacity:.85}
   textarea{
     width:100%; height:56px; background:#0d1207; color:#aab894;
@@ -174,6 +192,14 @@
       </div>
       <div class="status" id="netStatus"></div>
     </div>
+    <div id="lobbyPanel">
+      <div class="small">ROOM CODE — up to 4 players</div>
+      <div class="roomcode" id="lobbyCode">····</div>
+      <div id="lobbyList"></div>
+      <div id="lobbySet"></div>
+      <div class="btnrow"><button class="accent1" id="btnStart" style="display:none">▸ START BATTLE</button></div>
+      <div class="status" id="lobbyMsg"></div>
+    </div>
   </div>
 </div>
 
@@ -206,6 +232,14 @@ let lastWinner = 0;
 let gameMode = 'dm'; // 'dm' deathmatch | 'dom' domination
 const dom = { pts: [0, 0], cap: [0, 0], resp: [0, 0], owner: -1, zone: { x: W/2, y: H/2, r: TILE * 2 } };
 let floaters = [];
+
+const PCOLORS = [
+  ['#ffa62e', '#9c5a10'],
+  ['#3ed6c0', '#137a6b'],
+  ['#c08cff', '#6b3fa8'],
+  ['#9df06b', '#4e8a2a'],
+];
+const TEAMRGB = ['255,166,46', '62,214,192'];
 
 const keys = {};
 let pendingConfirm = null; // 'newmap' | 'reset' | null
@@ -284,6 +318,8 @@ function localInput() {
 // ---------- NETWORK (WebRTC peer-to-peer) ----------
 const net = {
   role: null, ws: null, connected: false, room: null, idx: 0, rtt: null, snapBuf: [], clkOff: null,
+  roster: null, tm: false, sub: 'last', lobby: null, winners: [], matchOver: false,
+  domP: null, domC: null, domO: -1, domResp: [],
   remoteInput: {}, prevRemoteAdv: false,
   inSeq: 0, snapSeq: 0, lastSnapSeq: -1, lastInSeq: -1,
   sendT: 0, events: []
@@ -314,17 +350,25 @@ function setupWS(ws) {
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if (m.t === 'room') {
       net.room = m.code;
-      showRoom(m.code);
     } else if (m.t === 'ready') {
       net.connected = true;
-      net.idx = m.idx != null ? m.idx : (net.role === 'host' ? 0 : 1);
-      setStatus('FRIEND CONNECTED!');
-      setTimeout(startOnlineGame, 400);
+      net.idx = m.idx != null ? m.idx : 0;
+    } else if (m.t === 'lobby') {
+      net.lobby = m;
+      showLobby();
+    } else if (m.t === 'started') {
+      net.roster = m.pl;
+      net.tm = !!m.set.tm;
+      net.sub = m.set.sub;
+      gameMode = m.set.gm;
+      startOnlineGame();
     } else if (m.t === 'err') {
       setStatus(m.msg || 'ERROR');
+      const lm = document.getElementById('lobbyMsg');
+      if (lm) lm.textContent = m.msg || 'ERROR';
     } else if (m.t === 'peer_left') {
-      if (net.connected) onDisconnect();
-      else setStatus('YOUR FRIEND LEFT THE ROOM');
+      if (mode === 'online') onDisconnect();
+      else { hideLobby(); setStatus('THE HOST CLOSED THE ROOM'); }
     } else if (m.t === 'snap') {
       if (m.q <= net.lastSnapSeq) return;
       net.lastSnapSeq = m.q;
@@ -430,11 +474,127 @@ function updateMyBullets(dt) {
 
 function startOnlineGame() {
   mode = 'online';
-  scores = [0, 0]; round = 1;
-  setNames(net.idx === 0 ? 'YOU' : 'FRIEND', net.idx === 0 ? 'FRIEND' : 'YOU');
+  scores = net.roster.map(() => 0);
+  round = 1;
+  tanks = net.roster.map((p, i) => {
+    const sp = spawnPoint(i);
+    return makeTank(i, sp.x, sp.y, sp.a, PCOLORS[i][0], PCOLORS[i][1]);
+  });
+  buildHUD();
+  hideLobby();
   hideOverlay();
-  // the server runs the match and streams snapshots to both players
 }
+
+function spawnPoint(i) {
+  const pts = [
+    { x: 2*TILE + TILE/2, y: 2*TILE + TILE/2, a: 0 },
+    { x: (COLS-3)*TILE + TILE/2, y: (ROWS-3)*TILE + TILE/2, a: Math.PI },
+    { x: (COLS-3)*TILE + TILE/2, y: 2*TILE + TILE/2, a: Math.PI },
+    { x: 2*TILE + TILE/2, y: (ROWS-3)*TILE + TILE/2, a: 0 },
+  ];
+  return pts[i];
+}
+
+// ---------- LOBBY ----------
+const lobbyPanel = document.getElementById('lobbyPanel');
+let nameTimer = null;
+
+function showLobby() {
+  const L = net.lobby;
+  if (!L) return;
+  netPanel.classList.remove('show');
+  document.getElementById('hostFlow').classList.remove('show');
+  document.getElementById('joinFlow').classList.remove('show');
+  menuArea.style.display = 'none';
+  overlay.classList.add('show');
+  document.getElementById('ovTitle').textContent = 'BATTLE LOBBY';
+  document.getElementById('ovTitle').style.color = 'var(--sand)';
+  document.getElementById('ovSub').textContent = net.idx === 0
+    ? 'Share the code · set the rules · press start'
+    : 'Waiting for the host to start the battle';
+  lobbyPanel.classList.add('show');
+  document.getElementById('lobbyCode').textContent = L.code;
+
+  const list = document.getElementById('lobbyList');
+  list.innerHTML = '';
+  L.pl.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'lrow';
+    const dot = document.createElement('div');
+    dot.className = 'ldot';
+    dot.style.background = PCOLORS[i][0];
+    row.appendChild(dot);
+    const nameBox = document.createElement('div');
+    nameBox.className = 'lname';
+    if (i === net.idx) {
+      const inp = document.createElement('input');
+      inp.value = p.n;
+      inp.maxLength = 12;
+      inp.addEventListener('keydown', ev => ev.stopPropagation());
+      inp.addEventListener('input', () => {
+        clearTimeout(nameTimer);
+        nameTimer = setTimeout(() => netSendRaw({ t: 'name', n: inp.value }), 400);
+      });
+      nameBox.appendChild(inp);
+    } else {
+      nameBox.textContent = p.n;
+    }
+    row.appendChild(nameBox);
+    if (i === 0) {
+      const h = document.createElement('span');
+      h.className = 'lhost';
+      h.textContent = 'HOST';
+      row.appendChild(h);
+    }
+    if (L.set.tm) {
+      const tb = document.createElement('span');
+      tb.className = 'lteam t' + p.team + (net.idx === 0 ? ' clickable' : '');
+      tb.textContent = 'TEAM ' + (p.team === 0 ? 'A' : 'B');
+      if (net.idx === 0) tb.onclick = () => netSendRaw({ t: 'team', who: i });
+      row.appendChild(tb);
+    }
+    list.appendChild(row);
+  });
+
+  const set = document.getElementById('lobbySet');
+  set.innerHTML = '';
+  const mkBtn = (label, sel, onclick) => {
+    const b = document.createElement('button');
+    b.className = 'mini' + (sel ? ' sel' : '');
+    b.textContent = label;
+    if (net.idx === 0) b.onclick = onclick; else b.disabled = true;
+    return b;
+  };
+  const mkLabel = txt => Object.assign(document.createElement('span'), { className: 'slabel', textContent: txt });
+  const g1 = document.createElement('div'); g1.className = 'sgroup';
+  g1.append(mkLabel('MODE'));
+  g1.append(mkBtn('DEATHMATCH', L.set.gm === 'dm', () => netSendRaw({ t: 'set', k: 'gm', v: 'dm' })));
+  g1.append(mkBtn('DOMINATION', L.set.gm === 'dom', () => netSendRaw({ t: 'set', k: 'gm', v: 'dom' })));
+  set.append(g1);
+  if (L.set.gm === 'dm') {
+    const g2 = document.createElement('div'); g2.className = 'sgroup';
+    g2.append(mkLabel('RULES'));
+    g2.append(mkBtn('LAST STANDING', L.set.sub === 'last', () => netSendRaw({ t: 'set', k: 'sub', v: 'last' })));
+    g2.append(mkBtn('FIRST KILL', L.set.sub === 'first', () => netSendRaw({ t: 'set', k: 'sub', v: 'first' })));
+    g2.append(mkBtn('KILL POINTS', L.set.sub === 'kills', () => netSendRaw({ t: 'set', k: 'sub', v: 'kills' })));
+    set.append(g2);
+  }
+  const g3 = document.createElement('div'); g3.className = 'sgroup';
+  g3.append(mkLabel('SIDES'));
+  g3.append(mkBtn('FREE-FOR-ALL', !L.set.tm, () => netSendRaw({ t: 'set', k: 'tm', v: false })));
+  g3.append(mkBtn('TEAMS', L.set.tm, () => netSendRaw({ t: 'set', k: 'tm', v: true })));
+  set.append(g3);
+
+  const btnS = document.getElementById('btnStart');
+  btnS.style.display = net.idx === 0 ? '' : 'none';
+  btnS.disabled = L.pl.length < 2;
+  btnS.textContent = L.pl.length < 2 ? 'WAITING FOR PLAYERS…' : '▸ START BATTLE (' + L.pl.length + ')';
+}
+
+function hideLobby() {
+  lobbyPanel.classList.remove('show');
+}
+document.getElementById('btnStart').onclick = () => netSendRaw({ t: 'start' });
 
 function onDisconnect() {
   net.connected = false;
@@ -450,8 +610,12 @@ function sendInput() {
 
 function applySnapshot(m) {
   const prevState = state;
-  state = m.st; countdownT = m.cd; round = m.rd; scores = m.sc; lastWinner = m.wn;
+  state = m.st; countdownT = m.cd; round = m.rd; scores = m.sc;
+  net.winners = m.wi || []; net.matchOver = !!m.mo;
   gameMode = m.gm || 'dm';
+  net.sub = m.sub || net.sub;
+  net.tm = !!m.tm;
+  net.domResp = m.rs || [];
   if (m.ep) {
     const rtt = Date.now() - m.ep;
     if (rtt >= 0 && rtt < 5000) {
@@ -461,7 +625,7 @@ function applySnapshot(m) {
       el.style.color = net.rtt < 90 ? '#9df06b' : net.rtt < 180 ? '#e8c85a' : '#e05555';
     }
   }
-  if (m.dm) { dom.pts = m.dm.p; dom.cap = m.dm.c; dom.owner = m.dm.o; dom.resp = m.dm.rs; }
+  if (m.dm) { net.domP = m.dm.p; net.domC = m.dm.c; net.domO = m.dm.o; }
   for (let r = 0; r < ROWS; r++)
     for (let c = 0; c < COLS; c++)
       grid[r][c] = +m.g[r * COLS + c];
@@ -474,7 +638,8 @@ function applySnapshot(m) {
   }
   m.tk.forEach((s, i) => {
     const t = tanks[i];
-    t.type = s.ty; t.hp = s.hp; t.alive = !!s.al;
+    if (!t) return;
+    t.type = s.ty; t.hp = s.hp; t.alive = !!s.al; t.gone = !!s.gn;
     if (i === net.idx) { t.sx = s.x; t.sy = s.y; t.sa = s.a; t.stu = s.tu; }
   });
   for (const e of m.ev) {
@@ -484,8 +649,10 @@ function applySnapshot(m) {
     else if (e.e === 'mz') muzzleFx(e.x, e.y, e.a);
     else if (e.e === 'sh') shake = Math.max(shake, e.v);
     else if (e.e === 'cp') {
-      addFloater(dom.zone.x, dom.zone.y - 20, 'CAPTURED!', e.w === 0 ? '#ffa62e' : '#3ed6c0');
-      sparks(dom.zone.x, dom.zone.y, e.w === 0 ? '#ffa62e' : '#3ed6c0', 18);
+      const col = (mode === 'online') ? sideHex(e.w) : (e.w === 0 ? '#ffa62e' : '#3ed6c0');
+      const txt = (mode === 'online' && gameMode === 'dm') ? '+1 KILL' : 'CAPTURED!';
+      addFloater(gameMode === 'dm' ? W/2 : dom.zone.x, (gameMode === 'dm' ? 40 : dom.zone.y - 20), txt, col);
+      if (gameMode === 'dom') sparks(dom.zone.x, dom.zone.y, col, 18);
     }
   }
   updateHUD();
@@ -495,16 +662,19 @@ function applySnapshot(m) {
     clearTimeout(overlayTimer);
     overlayTimer = setTimeout(() => {
       if (state !== 'roundOver') return;
-      const iWon = lastWinner === net.idx;
-      let title, sub;
-      if (gameMode === 'dom') {
-        title = iWon ? 'YOU WIN THE MATCH' : 'YOUR FRIEND DOMINATES';
-        sub = '100 points! · Press SPACE, Z or X for a rematch';
-      } else {
-        title = iWon ? 'YOU WIN THE ROUND' : 'YOUR FRIEND GOT YOU';
-        sub = 'Press SPACE, Z or X for the next battlefield';
+      const iWon = net.winners.includes(net.idx);
+      let who;
+      if (iWon) who = net.winners.length > 1 ? 'YOUR TEAM WINS' : 'YOU WIN';
+      else {
+        const wNames = net.winners.map(i => (net.roster && net.roster[i]) ? net.roster[i].n : '?');
+        who = wNames.join(' & ') + (net.winners.length > 1 ? ' WIN' : ' WINS');
       }
-      showOverlay(title, sub, iWon ? 'var(--p2)' : 'var(--p1)');
+      const title = who + (net.matchOver ? ' THE MATCH' : ' THE ROUND');
+      const sub = net.matchOver
+        ? 'Press SPACE, Z or X for a rematch'
+        : 'Press SPACE, Z or X for the next battlefield';
+      const col = net.winners.length ? PCOLORS[net.winners[0]][0] : 'var(--sand)';
+      showOverlay(title, sub, iWon ? PCOLORS[net.idx][0] : col);
     }, 500);
   }
   if (state === 'countdown' && prevState !== 'countdown') {
@@ -1035,7 +1205,7 @@ function drawTile(c, r) {
 }
 
 function drawTank(t) {
-  if (!t.alive) return;
+  if (!t.alive || t.gone) return;
   ctx.save();
   ctx.translate(t.x, t.y);
 
@@ -1116,7 +1286,32 @@ function draw() {
     }
   }
 
+  // team rings under tanks
+  if (mode === 'online' && net.tm && net.roster) {
+    for (const t of tanks) {
+      if (!t.alive || t.gone) continue;
+      ctx.beginPath();
+      ctx.arc(t.x, t.y, 17, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(' + TEAMRGB[net.roster[t.id].team] + ',.5)';
+      ctx.lineWidth = 2;
+      ctx.stroke();
+    }
+  }
+
   for (const t of tanks) drawTank(t);
+
+  // player names above tanks
+  if (mode === 'online' && net.roster) {
+    ctx.font = '700 10px "Courier New", monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'bottom';
+    for (const t of tanks) {
+      if (!t.alive || t.gone || t.id === net.idx) continue;
+      ctx.globalAlpha = 0.75;
+      ctx.fillStyle = t.color;
+      ctx.fillText(net.roster[t.id].n, t.x, t.y - 20);
+      ctx.globalAlpha = 1;
+    }
+  }
 
   for (const p of particles) {
     ctx.globalAlpha = Math.max(0, p.life / p.max);
@@ -1125,17 +1320,21 @@ function draw() {
   }
   ctx.globalAlpha = 1;
 
-  // respawn countdowns over the spawn points
-  if (gameMode === 'dom' && state === 'play') {
-    for (const i of [0, 1]) {
-      if (!tanks[i].alive) {
-        const s = spawnPoint(i);
-        ctx.font = '900 22px "Courier New", monospace';
-        ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-        ctx.fillStyle = tanks[i].color;
-        ctx.globalAlpha = 0.85;
-        ctx.fillText(String(Math.max(1, Math.ceil(dom.resp[i] / 1000))), s.x, s.y);
-        ctx.globalAlpha = 1;
+  // respawn countdowns over the spawn points (domination & kill-points modes)
+  if (state === 'play') {
+    const respArr = (mode === 'online') ? net.domResp : dom.resp;
+    const canResp = gameMode === 'dom' || (mode === 'online' && net.sub === 'kills');
+    if (canResp && respArr) {
+      for (let i = 0; i < tanks.length; i++) {
+        if (!tanks[i].alive && !tanks[i].gone && respArr[i] > 0) {
+          const s = spawnPoint(i);
+          ctx.font = '900 22px "Courier New", monospace';
+          ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+          ctx.fillStyle = tanks[i].color;
+          ctx.globalAlpha = 0.85;
+          ctx.fillText(String(Math.max(1, Math.ceil(respArr[i] / 1000))), s.x, s.y);
+          ctx.globalAlpha = 1;
+        }
       }
     }
   }
@@ -1154,11 +1353,24 @@ function draw() {
   ctx.restore();
 }
 
+function sideRGB(sIdx) {
+  if (mode === 'online' && net.tm) return TEAMRGB[sIdx] || '200,185,138';
+  const hex = (PCOLORS[sIdx] || ['#c8b98a'])[0].slice(1);
+  return parseInt(hex.slice(0,2),16) + ',' + parseInt(hex.slice(2,4),16) + ',' + parseInt(hex.slice(4,6),16);
+}
+function sideHex(sIdx) {
+  if (mode === 'online' && net.tm) return sIdx === 0 ? '#ffa62e' : '#3ed6c0';
+  return (PCOLORS[sIdx] || ['#c8b98a'])[0];
+}
+
 function drawZone() {
   const z = dom.zone;
-  const lead = dom.cap[0] >= dom.cap[1] ? 0 : 1;
-  const capv = dom.cap[lead];
-  const rgb = dom.owner === 0 ? '255,166,46' : dom.owner === 1 ? '62,214,192' : '200,185,138';
+  const caps = (mode === 'online' && net.domC) ? net.domC : dom.cap;
+  const owner = (mode === 'online') ? net.domO : dom.owner;
+  let lead = 0;
+  for (let i = 1; i < caps.length; i++) if (caps[i] > caps[lead]) lead = i;
+  const capv = caps[lead] || 0;
+  const rgb = owner >= 0 ? sideRGB(owner) : '200,185,138';
   ctx.save();
   ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
   ctx.fillStyle = `rgba(${rgb},.10)`; ctx.fill();
@@ -1169,7 +1381,7 @@ function drawZone() {
     ctx.beginPath();
     ctx.arc(z.x, z.y, z.r - 7, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * capv / 100);
     ctx.lineWidth = 5;
-    ctx.strokeStyle = lead === 0 ? '#ffa62e' : '#3ed6c0';
+    ctx.strokeStyle = (mode === 'online') ? sideHex(lead) : (lead === 0 ? '#ffa62e' : '#3ed6c0');
     ctx.stroke();
     ctx.font = '900 16px "Courier New", monospace';
     ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
@@ -1237,7 +1449,69 @@ function setNames(a, b) {
   document.getElementById('name2').textContent = b;
 }
 
+function buildHUD() {
+  const hud = document.getElementById('hud');
+  hud.innerHTML = '';
+  net.roster.forEach((p, i) => {
+    const chip = document.createElement('div');
+    chip.className = 'score';
+    chip.id = 'pchip' + i;
+    const nm = document.createElement('span');
+    nm.className = 'name';
+    nm.style.color = PCOLORS[i][0];
+    nm.textContent = (i === net.idx ? '▸ ' : '') + p.n;
+    const hp = document.createElement('div');
+    hp.className = 'hp'; hp.id = 'php' + i;
+    const num = document.createElement('span');
+    num.className = 'num'; num.id = 'pscore' + i;
+    num.textContent = '0';
+    chip.append(nm, hp, num);
+    if (net.tm) chip.style.borderColor = 'rgba(' + TEAMRGB[p.team] + ',.6)';
+    hud.appendChild(chip);
+    if (i === Math.floor((net.roster.length - 1) / 2)) {
+      const rl = document.createElement('div');
+      rl.className = 'round'; rl.id = 'roundLabel'; rl.textContent = '';
+      const pg = document.createElement('div');
+      pg.className = 'round'; pg.id = 'ping'; pg.style.minWidth = '88px';
+      hud.append(rl, pg);
+    }
+  });
+  updateHUD();
+}
+
+function onlineRoundLabel() {
+  if (gameMode === 'dom') return 'DOMINATION · FIRST TO 100';
+  if (net.sub === 'first') return 'FIRST KILL WINS · ROUND ' + round;
+  if (net.sub === 'kills') return 'FIRST TO 10 KILLS';
+  return 'LAST TANK STANDING · ROUND ' + round;
+}
+
 function updateHUD() {
+  if (mode === 'online' && net.roster) {
+    net.roster.forEach((p, i) => {
+      const sc = document.getElementById('pscore' + i);
+      if (!sc) return;
+      let val = scores[i] || 0;
+      if (gameMode === 'dom' && net.domP) val = net.domP[net.tm ? p.team : i] || 0;
+      sc.textContent = Math.floor(val);
+      const hpEl = document.getElementById('php' + i);
+      hpEl.innerHTML = '';
+      const t = tanks[i];
+      for (let k2 = 0; k2 < 3; k2++) {
+        const d = document.createElement('div');
+        d.className = 'pip';
+        if (t && t.alive && k2 < t.hp) {
+          d.style.background = PCOLORS[i][0];
+          d.style.boxShadow = '0 0 6px ' + PCOLORS[i][0];
+        }
+        hpEl.appendChild(d);
+      }
+      if (t && t.gone) document.getElementById('pchip' + i).style.opacity = 0.35;
+    });
+    const rl = document.getElementById('roundLabel');
+    if (rl) rl.textContent = onlineRoundLabel();
+    return;
+  }
   if (gameMode === 'dom') {
     document.getElementById('score1').textContent = Math.floor(dom.pts[0]);
     document.getElementById('score2').textContent = Math.floor(dom.pts[1]);
@@ -1313,7 +1587,6 @@ $('btnBackMenu').onclick = () => {
 };
 $('btnHost').onclick = async () => {
   $('joinFlow').classList.remove('show');
-  $('hostFlow').classList.add('show');
   setStatus('CREATING ROOM…');
   try { await hostCreate(); }
   catch (e) {
@@ -1387,8 +1660,8 @@ function predictOwnTank(t, dt) {
   const ny = t.y + Math.sin(t.angle) * v;
   if (!circleHitsWall(nx, t.y, T_RADIUS)) t.x = nx;
   if (!circleHitsWall(t.x, ny, T_RADIUS)) t.y = ny;
-  const other = tanks[1 - t.id];
-  if (other.alive) {
+  for (const other of tanks) {
+    if (other === t || !other.alive) continue;
     const dx = t.x - other.x, dy = t.y - other.y;
     const d = Math.hypot(dx, dy);
     if (d > 0 && d < T_RADIUS * 2) {
@@ -1461,8 +1734,10 @@ function updateMyShells(dt) {
     }
     if (removed) continue;
     for (const t of tanks) {
-      if (!t.alive) continue;
+      if (!t.alive || t.gone) continue;
       if (t.id === net.idx && b.grace > 0) continue;
+      if (net.tm && net.roster && t.id !== net.idx &&
+          net.roster[t.id].team === net.roster[net.idx].team) continue; // no friendly fire
       if ((t.x-b.x)**2 + (t.y-b.y)**2 < (T_RADIUS+3)**2) {
         myShells.splice(si, 1);
         sparks(t.x, t.y, t.color, 8);
@@ -1491,6 +1766,7 @@ function renderFromBuffer() {
   const span = b.ts - a.ts;
   const f = span > 0 ? Math.min(1, Math.max(0, (rt - a.ts) / span)) : 1;
   a.m.tk.forEach((sa, i) => {
+    if (!tanks[i] || !b.m.tk[i]) return;
     if (i === net.idx && state === 'play' && tanks[i].alive) return; // own tank: predicted locally
     const sb = b.m.tk[i], t = tanks[i];
     const px = t.x, py = t.y;
