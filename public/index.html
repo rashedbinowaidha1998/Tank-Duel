@@ -160,7 +160,7 @@
       <div class="btnrow" style="margin-bottom:14px">
         <button class="mini sel" id="pickDM">DEATHMATCH</button>
         <button class="mini" id="pickDom">DOMINATION · first to 100</button>
-        <button class="mini" id="pickCTF">CAPTURE FLAG · first to 100</button>
+        <button class="mini" id="pickCTF">CAPTURE FLAG · first to 50</button>
       </div>
       <div class="btnrow" id="menuBtns">
         <button class="accent1" id="btnBot">▸ VS BOT</button>
@@ -562,6 +562,7 @@ function applySnapshot(m) {
     if (!t) return;
     if (i === net.idx && !t.alive && s.al) t.ammo = 5; // fresh spawn, fresh magazine
     if (i !== net.idx && s.am != null) t.ammoView = s.am;
+    t.inv = s.iv || 0;
     t.type = s.ty; t.hp = s.hp; t.alive = !!s.al; t.gone = !!s.gn;
     if (i === net.idx) { t.sx = s.x; t.sy = s.y; t.sa = s.a; t.stu = s.tu; }
   });
@@ -679,7 +680,7 @@ function updateCTFLocal(dt) {
     sparks(sp.x, sp.y, t.color, 20);
     shake = Math.max(shake, 5);
     updateHUD();
-    if (scores[t.id] >= 100) { ctfWin(t.id); return; }
+    if (scores[t.id] >= 50) { ctfWin(t.id); return; }
   }
 }
 
@@ -692,7 +693,7 @@ function ctfWin(i) {
   overlayTimer = setTimeout(() => {
     if (state !== 'roundOver') return;
     showOverlay(i === 0 ? 'YOU WIN THE MATCH' : 'THE BOT WINS THE MATCH',
-      '100 points! · Press SPACE, Z or X for a rematch', tanks[i].color);
+      '50 points! · Press SPACE, Z or X for a rematch', tanks[i].color);
   }, 500);
 }
 
@@ -740,6 +741,7 @@ function domWin(i) {
 }
 
 function respawn(i) {
+  tanks[i].inv = 3000; // spawn shield: 3s, cut to 1s left the moment you drive
   const t = tanks[i], s = spawnPoint(i);
   t.x = s.x; t.y = s.y; t.nx = s.x; t.ny = s.y;
   t.angle = s.a; t.turret = s.a; t.na = s.a; t.ntu = s.a;
@@ -848,7 +850,7 @@ function makeFloor() {
 function makeTank(id, x, y, angle, color, dark) {
   return { id, x, y, angle, color, dark, hp: 3, speed: 0, cooldown: 0, alive: true,
            recoil: 0, treadPhase: 0, nx: x, ny: y, na: angle,
-           turret: angle, ntu: angle, type: 'gunner', ammo: 5 };
+           turret: angle, ntu: angle, type: 'gunner', ammo: 5, inv: 0 };
 }
 let tanks = [];
 
@@ -883,6 +885,11 @@ function updateTank(t, dt) {
   if (!t.alive) return;
   const k = dt / 16.667; // time-based: identical speed on 60Hz and 144Hz screens
   const c = controls(t);
+  if (t.inv > 0) {
+    t.inv -= dt;
+    if ((c.fwd || c.back) && t.inv > 1000) t.inv = 1000; // moving forfeits most of the shield
+    if (t.inv < 0) t.inv = 0;
+  }
   if (c.left) { t.angle -= T_TURN * k; if (t.type === 'gunner') t.turret -= T_TURN * k; }
   if (c.right) { t.angle += T_TURN * k; if (t.type === 'gunner') t.turret += T_TURN * k; }
   if (t.type === 'gunner') {
@@ -1115,6 +1122,7 @@ function updateBullets(dt) {
 
     for (const t of tanks) {
       if (!t.alive) continue;
+      if (t.inv > 0) continue; // spawn shield: shells pass clean through
       if (t.id === b.owner && b.grace > 0) continue;
       if ((t.x-b.x)**2 + (t.y-b.y)**2 < (T_RADIUS+3)**2) {
         bullets.splice(i, 1);
@@ -1149,7 +1157,7 @@ function damage(t, by) {
         scores[by] += 2;
         addFloater(W/2, 40, '+2', tanks[by].color);
         updateHUD();
-        if (scores[by] >= 100) { ctfWin(by); return; }
+        if (scores[by] >= 50) { ctfWin(by); return; }
       }
       dom.resp[t.id] = 2500;
       return;
@@ -1325,6 +1333,25 @@ function draw() {
   }
 
   for (const t of tanks) drawTank(t);
+
+  // spawn shields: the tank beats white-grey, with a ring that panics in its last second
+  for (const t of tanks) {
+    if (!t.alive || t.gone || !(t.inv > 0)) continue;
+    const pulse = t.inv < 1000 ? 55 : 150;
+    const beat = 0.5 + 0.5 * Math.sin(performance.now() / pulse);
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 16, 0, Math.PI * 2);
+    ctx.fillStyle = '#e2e7ec';
+    ctx.globalAlpha = 0.16 + 0.30 * beat;
+    ctx.fill();
+    ctx.beginPath();
+    ctx.arc(t.x, t.y, 20, 0, Math.PI * 2);
+    ctx.strokeStyle = '#eef1f4';
+    ctx.lineWidth = 2.5;
+    ctx.globalAlpha = 0.25 + 0.35 * beat;
+    ctx.stroke();
+    ctx.globalAlpha = 1;
+  }
 
   // shell cylinders above every tank
   if (mode === 'online' || mode === 'bot') {
@@ -1612,7 +1639,7 @@ function buildHUD() {
 }
 
 function onlineRoundLabel() {
-  if (gameMode === 'ctf') return 'CAPTURE THE FLAG · FIRST TO 100';
+  if (gameMode === 'ctf') return 'CAPTURE THE FLAG · FIRST TO ' + (net.roster ? net.roster.length * 25 : 100);
   if (gameMode === 'dom') return 'DOMINATION · FIRST TO 100';
   if (net.sub === 'first') return 'FIRST KILL WINS · ROUND ' + round;
   if (net.sub === 'kills') return 'FIRST TO 10 KILLS';
@@ -1648,7 +1675,7 @@ function updateHUD() {
   if (gameMode === 'ctf') {
     document.getElementById('score1').textContent = Math.floor(scores[0]);
     document.getElementById('score2').textContent = Math.floor(scores[1]);
-    document.getElementById('roundLabel').textContent = 'CAPTURE THE FLAG · FIRST TO 100';
+    document.getElementById('roundLabel').textContent = 'CAPTURE THE FLAG · FIRST TO 50';
   } else if (gameMode === 'dom') {
     document.getElementById('score1').textContent = Math.floor(dom.pts[0]);
     document.getElementById('score2').textContent = Math.floor(dom.pts[1]);
@@ -1871,6 +1898,7 @@ function updateMyShells(dt) {
     if (removed) continue;
     for (const t of tanks) {
       if (!t.alive || t.gone) continue;
+      if (t.inv > 0) continue; // spawn shield: shells pass clean through
       if (t.id === net.idx && b.grace > 0) continue;
       if (net.tm && net.roster && t.id !== net.idx &&
           net.roster[t.id].team === net.roster[net.idx].team) continue; // no friendly fire
