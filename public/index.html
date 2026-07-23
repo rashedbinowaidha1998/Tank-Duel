@@ -41,6 +41,17 @@
   .stage{position:relative; border:2px solid var(--line); border-radius:6px; overflow:hidden;
          box-shadow:0 20px 60px rgba(0,0,0,.55)}
   canvas{display:block; background:#171c0e}
+  .confirm{
+    position:absolute; top:14px; left:50%; transform:translateX(-50%);
+    display:none; z-index:5; background:rgba(13,18,7,.93);
+    border:1px solid var(--sand); border-radius:6px; padding:10px 24px;
+    font-family:"Courier New", monospace; text-align:center;
+  }
+  .confirm.show{display:block}
+  .confirm .cTitle{font-weight:900; letter-spacing:.22em; color:var(--sand); font-size:14px; margin-bottom:4px}
+  .confirm .cKeys{font-size:12px; opacity:.85; letter-spacing:.15em}
+  .confirm .cKeys b.yes{color:#9df06b}
+  .confirm .cKeys b.no{color:#e05555}
   .overlay{
     position:absolute; inset:0; display:none; flex-direction:column;
     align-items:center; justify-content:center; gap:12px;
@@ -119,6 +130,10 @@
 
 <div class="stage">
   <canvas id="game" width="896" height="576"></canvas>
+  <div class="confirm" id="confirmBox">
+    <div class="cTitle" id="confirmTitle">GENERATE A NEW MAP?</div>
+    <div class="cKeys"><b class="yes">Z</b> — YES &nbsp;·&nbsp; <b class="no">X</b> — NO</div>
+  </div>
   <div class="overlay show" id="overlay">
     <div class="big" id="ovTitle">TANK DUEL</div>
     <div class="small" id="ovSub">Choose your battle</div>
@@ -165,7 +180,7 @@
 <div class="controls">
   <div class="c1"><b>MOVE</b> — <kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></div>
   <div class="c2"><b>FIRE</b> — <kbd>Space</kbd> · <b>GUNNER TURRET</b> — <kbd>Z</kbd>/<kbd>X</kbd></div>
-  <div><b>N</b> new map · <b>R</b> reset score · <b>Space</b>/<b>Z</b>/<b>X</b> next round</div>
+  <div><b>N</b> new map · <b>R</b> reset score (host only · <b>Z</b> confirm / <b>X</b> cancel) · <b>Space</b>/<b>Z</b>/<b>X</b> next round</div>
 </div>
 <div class="meta">EVERY ROUND GENERATES A NEW SYMMETRIC BATTLEFIELD · BULLETS RICOCHET OFF STEEL · BRICK IS DESTRUCTIBLE</div>
 
@@ -184,6 +199,8 @@ let mode = null;    // 'bot' | 'online'
 let countdownT = 0;
 let shake = 0, particles = [], bullets = [];
 let bulletSeq = 0;
+let myShells = [], myShellSeq = 0;      // online: shells I own and simulate myself
+const localBroken = new Map();          // bricks I broke locally, kept broken until the server agrees
 let overlayTimer = null;
 let lastWinner = 0;
 let gameMode = 'dm'; // 'dm' deathmatch | 'dom' domination
@@ -191,22 +208,47 @@ const dom = { pts: [0, 0], cap: [0, 0], resp: [0, 0], owner: -1, zone: { x: W/2,
 let floaters = [];
 
 const keys = {};
+let pendingConfirm = null; // 'newmap' | 'reset' | null
+
+function askConfirm(action) {
+  pendingConfirm = action;
+  document.getElementById('confirmTitle').textContent =
+    action === 'newmap' ? 'GENERATE A NEW MAP?' : 'RESET THE SCORE?';
+  document.getElementById('confirmBox').classList.add('show');
+}
+function closeConfirm() {
+  pendingConfirm = null;
+  document.getElementById('confirmBox').classList.remove('show');
+}
+function execConfirm() {
+  const a = pendingConfirm;
+  closeConfirm();
+  if (mode === 'online') netSendRaw({ t: 'cmd', c: a });
+  else if (a === 'newmap') newRound(true);
+  else { scores = [0, 0]; round = 1; updateHUD(); newRound(); }
+}
 addEventListener('keydown', e => {
   keys[e.code] = true;
   if (['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code)) e.preventDefault();
+  if (pendingConfirm) {
+    if (e.code === 'KeyZ') execConfirm();
+    else if (e.code === 'KeyX') closeConfirm();
+    keys['KeyZ'] = keys['KeyX'] = keys['Space'] = false;
+    return;
+  }
   if (mode === 'online') {
     if (net.connected) {
       sendInput();
       if (net.idx === 0) { // room creator controls maps/score
-        if (e.code === 'KeyN' && (state === 'play' || state === 'countdown')) netSendRaw({ t: 'cmd', c: 'newmap' });
-        if (e.code === 'KeyR' && state !== 'menu') netSendRaw({ t: 'cmd', c: 'reset' });
+        if (e.code === 'KeyN' && (state === 'play' || state === 'countdown')) askConfirm('newmap');
+        if (e.code === 'KeyR' && state !== 'menu') askConfirm('reset');
       }
     }
     return;
   }
   if (mode !== 'bot') return;
-  if (e.code === 'KeyN' && (state === 'play' || state === 'countdown')) newRound(true);
-  if (e.code === 'KeyR' && state !== 'menu') { scores = [0,0]; round = 1; updateHUD(); newRound(); }
+  if (e.code === 'KeyN' && (state === 'play' || state === 'countdown')) askConfirm('newmap');
+  if (e.code === 'KeyR' && state !== 'menu') askConfirm('reset');
   if ((e.code === 'Space' || e.code === 'KeyZ' || e.code === 'KeyX') && state === 'roundOver') {
     round++;
     newRound();
@@ -220,6 +262,8 @@ addEventListener('keyup', e => {
 let myType = 'classic'; // 'classic' | 'gunner'
 
 function localInput() {
+  if (pendingConfirm) return { fwd: false, back: false, left: false, right: false,
+                               fire: false, tl: false, tr: false, adv: false, ty: myType };
   const inp = {
     fwd: keys['ArrowUp'], back: keys['ArrowDown'],
     left: keys['ArrowLeft'], right: keys['ArrowRight'],
@@ -400,7 +444,8 @@ function onDisconnect() {
 
 function sendInput() {
   if (!net.connected) return;
-  netSendRaw({ t: 'input', q: ++net.inSeq, k: localInput(), pt: Date.now() });
+  netSendRaw({ t: 'input', q: ++net.inSeq, k: localInput(), pt: Date.now(),
+               sh: myShells.map(b => ({ i: b.i, x: +b.x.toFixed(1), y: +b.y.toFixed(1) })) });
 }
 
 function applySnapshot(m) {
@@ -420,6 +465,13 @@ function applySnapshot(m) {
   for (let r = 0; r < ROWS; r++)
     for (let c = 0; c < COLS; c++)
       grid[r][c] = +m.g[r * COLS + c];
+  if (localBroken.size) {
+    const nowB = performance.now();
+    for (const [key, exp] of localBroken) {
+      if (exp < nowB) { localBroken.delete(key); continue; }
+      grid[Math.floor(key / COLS)][key % COLS] = 0;
+    }
+  }
   m.tk.forEach((s, i) => {
     const t = tanks[i];
     t.type = s.ty; t.hp = s.hp; t.alive = !!s.al;
@@ -455,7 +507,11 @@ function applySnapshot(m) {
       showOverlay(title, sub, iWon ? 'var(--p2)' : 'var(--p1)');
     }, 500);
   }
-  if (state === 'countdown' && prevState !== 'countdown') net.snapBuf.length = 0;
+  if (state === 'countdown' && prevState !== 'countdown') {
+    net.snapBuf.length = 0;
+    myShells = [];
+    localBroken.clear();
+  }
   if (state !== 'roundOver' && state !== 'menu') { clearTimeout(overlayTimer); hideOverlay(); }
 }
 
@@ -1045,6 +1101,21 @@ function draw() {
     ctx.arc(b.x, b.y, 1.5, 0, Math.PI * 2);
     ctx.fillStyle = '#fff'; ctx.fill();
   }
+  if (mode === 'online') {
+    const col = net.idx === 0 ? '#ffc36b' : '#8df0e0';
+    for (const b of myShells) {
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = col;
+      ctx.shadowColor = col; ctx.shadowBlur = 8;
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      ctx.beginPath();
+      ctx.arc(b.x, b.y, 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = '#fff'; ctx.fill();
+    }
+  }
+
   for (const t of tanks) drawTank(t);
 
   for (const p of particles) {
@@ -1155,6 +1226,7 @@ function newRound(keepDomPoints) {
   state = 'countdown';
   countdownT = 3600; // 3 · 2 · 1 (1s each) + GO! (600ms)
   clearTimeout(overlayTimer);
+  closeConfirm();
   keys['Space'] = keys['KeyZ'] = keys['KeyX'] = keys['KeyC'] = false; // don't carry the press into the round
   hideOverlay();
   updateHUD();
@@ -1324,6 +1396,20 @@ function predictOwnTank(t, dt) {
       if (!circleHitsWall(t.x + dx/d*push, t.y + dy/d*push, T_RADIUS)) { t.x += dx/d*push; t.y += dy/d*push; }
     }
   }
+  // shooter authority: my shells spawn instantly, on my screen, the moment I fire
+  t.cooldown -= dt;
+  t.recoil = Math.max(0, t.recoil - dt * 0.06);
+  if (c.fire && t.cooldown <= 0 && myShells.length < 4) {
+    t.cooldown = 380;
+    t.recoil = 5;
+    const mx = t.x + Math.cos(t.turret) * 20;
+    const my = t.y + Math.sin(t.turret) * 20;
+    myShells.push({ i: ++myShellSeq, x: mx, y: my,
+      vx: Math.cos(t.turret) * 5.6, vy: Math.sin(t.turret) * 5.6,
+      bounces: 2, grace: 160, life: 4200 });
+    muzzleFx(mx, my, t.turret);
+  }
+
   // reconcile with the host, deadband style: agree (which we nearly always do at low
   // ping) -> touch nothing; small drift -> gentle pull; teleport -> snap
   if (t.sx != null) {
@@ -1339,6 +1425,51 @@ function predictOwnTank(t, dt) {
     if (!c.left && !c.right) t.angle = lerpAngle(t.angle, t.sa, 0.08);
     if (t.type !== 'gunner') t.turret = t.angle;
     else if (!c.tl && !c.tr && !c.left && !c.right) t.turret = lerpAngle(t.turret, t.stu, 0.08);
+  }
+}
+
+// my shells live entirely on my screen: they bounce, break bricks, and land hits
+// against the world exactly as I see it (Mario Kart style) — the server referees
+function updateMyShells(dt) {
+  const k = dt / 16.667;
+  for (let si = myShells.length - 1; si >= 0; si--) {
+    const b = myShells[si];
+    b.life -= dt; b.grace -= dt;
+    if (b.life <= 0) { myShells.splice(si, 1); continue; }
+    let removed = false;
+    for (let st = 0; st < 2 && !removed; st++) {
+      const nx = b.x + b.vx * k / 2, ny = b.y + b.vy * k / 2;
+      const hit = solidAt(nx, ny);
+      if (hit !== 0) {
+        const c = Math.floor(nx / TILE), r = Math.floor(ny / TILE);
+        if (hit === 1) {
+          grid[r][c] = 0;
+          localBroken.set(r * COLS + c, performance.now() + 700);
+          brickDebris(c*TILE + TILE/2, r*TILE + TILE/2);
+          netSendRaw({ t: 'brick', c, r });
+          myShells.splice(si, 1); removed = true; break;
+        }
+        if (b.bounces <= 0) { sparks(b.x, b.y, '#cfd6dd'); myShells.splice(si, 1); removed = true; break; }
+        b.bounces--;
+        const hx = solidAt(b.x + b.vx * k / 2, b.y) !== 0;
+        const hy = solidAt(b.x, b.y + b.vy * k / 2) !== 0;
+        if (hx) b.vx = -b.vx;
+        if (hy) b.vy = -b.vy;
+        if (!hx && !hy) { b.vx = -b.vx; b.vy = -b.vy; }
+        sparks(b.x, b.y, '#e8ecf0');
+      } else { b.x = nx; b.y = ny; }
+    }
+    if (removed) continue;
+    for (const t of tanks) {
+      if (!t.alive) continue;
+      if (t.id === net.idx && b.grace > 0) continue;
+      if ((t.x-b.x)**2 + (t.y-b.y)**2 < (T_RADIUS+3)**2) {
+        myShells.splice(si, 1);
+        sparks(t.x, t.y, t.color, 8);
+        netSendRaw({ t: 'hit', tgt: t.id });
+        break;
+      }
+    }
   }
 }
 
@@ -1375,7 +1506,7 @@ function renderFromBuffer() {
     if (Math.hypot(t.x - px, t.y - py) > 0.3) t.treadPhase += 0.5;
   });
   const mapA = new Map(a.m.bl.map(x => [x.i, x]));
-  bullets = b.m.bl.map(sb2 => {
+  bullets = b.m.bl.filter(sb2 => sb2.o !== net.idx).map(sb2 => {
     const sa2 = mapA.get(sb2.i);
     if (sa2) return { x: sa2.x + (sb2.x - sa2.x) * f, y: sa2.y + (sb2.y - sa2.y) * f, owner: sb2.o };
     return { x: sb2.x, y: sb2.y, owner: sb2.o };
@@ -1406,8 +1537,9 @@ function loopStep(now) {
     }
 
     if (isOnline) {
-      renderFromBuffer(); // opponent + shells: the server's true state, jitter-buffered
+      renderFromBuffer(); // opponent + their shells: the server's state, jitter-buffered
       if (state === 'play' && tanks[net.idx].alive) predictOwnTank(tanks[net.idx], dt); // own tank: instant
+      updateMyShells(dt); // my shells: instant and mine to judge
     } else if (state === 'play') {
       if (mode === 'bot') updateAI(tanks[1], dt);
       for (const t of tanks) updateTank(t, dt);
