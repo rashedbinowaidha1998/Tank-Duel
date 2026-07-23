@@ -161,6 +161,7 @@
         <button class="mini sel" id="pickDM">DEATHMATCH</button>
         <button class="mini" id="pickDom">DOMINATION · first to 100</button>
         <button class="mini" id="pickCTF">CAPTURE FLAG · first to 50</button>
+        <button class="mini" id="pickEgl">EAGLE WAR</button>
       </div>
       <div class="btnrow" id="dmSubRow" style="margin-bottom:14px">
         <button class="mini sel" id="subLast">LAST STANDING</button>
@@ -227,6 +228,7 @@ let shake = 0, particles = [], bullets = [];
 let bulletSeq = 0;
 let myShells = [], myShellSeq = 0;
 let localFlags = null;      // offline CTF flags
+let localEagles = null;     // offline eagle war
 let localMatchOver = false; // offline CTF: rematch resets scores      // online: shells I own and simulate myself
 const localBroken = new Map();          // bricks I broke locally, kept broken until the server agrees
 let overlayTimer = null;
@@ -411,6 +413,16 @@ function startOnlineGame() {
   hideOverlay();
 }
 
+function eaglePoint(i) {
+  const pts = [
+    { x: 1*TILE + TILE/2, y: 1*TILE + TILE/2 },
+    { x: (COLS-2)*TILE + TILE/2, y: (ROWS-2)*TILE + TILE/2 },
+    { x: (COLS-2)*TILE + TILE/2, y: 1*TILE + TILE/2 },
+    { x: 1*TILE + TILE/2, y: (ROWS-2)*TILE + TILE/2 },
+  ];
+  return pts[i];
+}
+
 function spawnPoint(i) {
   const pts = [
     { x: 2*TILE + TILE/2, y: 2*TILE + TILE/2, a: 0 },
@@ -497,6 +509,7 @@ function showLobby() {
   g1.append(mkBtn('DEATHMATCH', L.set.gm === 'dm', () => netSendRaw({ t: 'set', k: 'gm', v: 'dm' })));
   g1.append(mkBtn('DOMINATION', L.set.gm === 'dom', () => netSendRaw({ t: 'set', k: 'gm', v: 'dom' })));
   g1.append(mkBtn('CAPTURE FLAG', L.set.gm === 'ctf', () => netSendRaw({ t: 'set', k: 'gm', v: 'ctf' })));
+  g1.append(mkBtn('EAGLE WAR', L.set.gm === 'egl', () => netSendRaw({ t: 'set', k: 'gm', v: 'egl' })));
   set.append(g1);
   if (L.set.gm === 'dm') {
     const g2 = document.createElement('div'); g2.className = 'sgroup';
@@ -554,6 +567,7 @@ function applySnapshot(m) {
   }
   if (m.dm) { net.domP = m.dm.p; net.domC = m.dm.c; net.domO = m.dm.o; }
   net.flags = m.fg || null;
+  net.eagles = m.eg || null;
   for (let r = 0; r < ROWS; r++)
     for (let c = 0; c < COLS; c++)
       grid[r][c] = +m.g[r * COLS + c];
@@ -570,6 +584,7 @@ function applySnapshot(m) {
     if (i === net.idx && !t.alive && s.al) t.ammo = 5; // fresh spawn, fresh magazine
     if (i !== net.idx && s.am != null) t.ammoView = s.am;
     t.inv = s.iv || 0;
+    t.elim = !!s.el;
     t.type = s.ty; t.hp = s.hp; t.alive = !!s.al; t.gone = !!s.gn;
     if (i === net.idx) { t.sx = s.x; t.sy = s.y; t.sa = s.a; t.stu = s.tu; }
   });
@@ -588,6 +603,16 @@ function applySnapshot(m) {
     }
     else if (e.e === 'fd') {
       sparks(e.x, e.y, '#c8b98a', 8);
+    }
+    else if (e.e === 'eh') {
+      sparks(e.x, e.y, e.c, 5);
+    }
+    else if (e.e === 'ebm') {
+      explode(e.x, e.y, e.c);
+      shake = Math.max(shake, 14);
+      const nm = (mode === 'online' && net.roster && net.roster[e.w]) ? net.roster[e.w].n
+               : (e.w === 0 ? 'YOU ARE' : 'THE BOT IS');
+      addFloater(e.x, e.y - 26, nm + ' ELIMINATED!', e.c);
     }
     else if (e.e === 'kp') {
       addFloater(W/2, 40, '+2', PCOLORS[e.w] ? PCOLORS[e.w][0] : '#fff');
@@ -637,12 +662,6 @@ function applySnapshot(m) {
 }
 
 // ---------- DOMINATION ----------
-function spawnPoint(i) {
-  return i === 0
-    ? { x: 2*TILE + TILE/2, y: 2*TILE + TILE/2, a: 0 }
-    : { x: (COLS-3)*TILE + TILE/2, y: (ROWS-3)*TILE + TILE/2, a: Math.PI };
-}
-
 function updateCTFLocal(dt) {
   const BASE_R = TILE * 1.3, TOUCH_R = T_RADIUS + 9;
   for (let o = 0; o < 2; o++) {
@@ -689,6 +708,31 @@ function updateCTFLocal(dt) {
     updateHUD();
     if (scores[t.id] >= 50) { ctfWin(t.id); return; }
   }
+}
+
+function localEagleHit(owner) {
+  const e = localEagles[owner];
+  const p = eaglePoint(owner);
+  e.h--;
+  sparks(p.x, p.y, tanks[owner].color, 5);
+  if (e.h > 0) return;
+  e.a = false;
+  const t = tanks[owner];
+  t.elim = true;
+  if (t.alive) { t.alive = false; explode(t.x, t.y, t.color); }
+  explode(p.x, p.y, t.color);
+  shake = 14;
+  addFloater(p.x, p.y - 26, (owner === 0 ? 'YOU ARE' : 'THE BOT IS') + ' ELIMINATED!', t.color);
+  localMatchOver = true;
+  lastWinner = 1 - owner;
+  state = 'roundOver';
+  updateHUD();
+  clearTimeout(overlayTimer);
+  overlayTimer = setTimeout(() => {
+    if (state !== 'roundOver') return;
+    showOverlay(lastWinner === 0 ? 'YOU RAZED THE BASE' : 'YOUR EAGLE HAS FALLEN',
+      'Press SPACE, Z or X for a rematch', tanks[lastWinner].color);
+  }, 500);
 }
 
 function killsWin(i) {
@@ -1020,7 +1064,7 @@ function lineOfSight(x0, y0, x1, y1) {
 function updateAI(t, dt) {
   const player = tanks[0];
   const inp = { fwd: false, back: false, left: false, right: false, fire: false };
-  const hasRespawns = gameMode === 'dom' || gameMode === 'ctf' || botSub === 'kills';
+  const hasRespawns = gameMode === 'dom' || gameMode === 'ctf' || gameMode === 'egl' || botSub === 'kills';
   if (!t.alive || (!player.alive && !hasRespawns)) { t.aiInput = inp; return; }
 
   // where the bot wants to go: the player in deathmatch, the zone in domination,
@@ -1032,6 +1076,10 @@ function updateAI(t, dt) {
     if (iCarry) { const sp = spawnPoint(1); gx = sp.x; gy = sp.y; }       // run it home
     else if (playerCarries && player.alive) { gx = player.x; gy = player.y; } // hunt the thief
     else { gx = localFlags[0].x; gy = localFlags[0].y; }                  // go steal
+  }
+  if (gameMode === 'egl' && localEagles) {
+    const ep = eaglePoint(0); // march on the player's eagle; fights happen en route
+    gx = ep.x; gy = ep.y;
   }
   if (gameMode === 'dom') {
     const z = dom.zone;
@@ -1096,6 +1144,19 @@ function updateAI(t, dt) {
   }
 
   if (los && Math.abs(diff) < 0.13 && distP < TILE * 12) inp.fire = true;
+  // eagle war: no shot at the player? bombard the eagle instead
+  if (gameMode === 'egl' && localEagles && localEagles[0].a && !los) {
+    const ep = eaglePoint(0);
+    if (lineOfSight(t.x, t.y, ep.x, ep.y)) {
+      const ea = Math.atan2(ep.y - t.y, ep.x - t.x);
+      let ed = ea - t.angle;
+      while (ed > Math.PI) ed -= Math.PI * 2;
+      while (ed < -Math.PI) ed += Math.PI * 2;
+      if (ed > 0.05) inp.right = true;
+      else if (ed < -0.05) inp.left = true;
+      if (Math.abs(ed) < 0.12) inp.fire = true;
+    }
+  }
   if (!los && Math.abs(diff) < 0.1) {
     const fx = t.x + Math.cos(t.angle) * TILE * 1.2;
     const fy = t.y + Math.sin(t.angle) * TILE * 1.2;
@@ -1142,6 +1203,18 @@ function updateBullets(dt) {
     }
     if (removed) continue;
 
+    if (gameMode === 'egl' && localEagles) {
+      for (let ei = 0; ei < 2 && !removed; ei++) {
+        if (!localEagles[ei].a || ei === b.owner) continue;
+        const ep = eaglePoint(ei);
+        if ((ep.x-b.x)**2 + (ep.y-b.y)**2 < 15*15) {
+          bullets.splice(i, 1); removed = true;
+          localEagleHit(ei);
+        }
+      }
+      if (removed) continue;
+    }
+
     for (const t of tanks) {
       if (!t.alive) continue;
       if (t.inv > 0) continue; // spawn shield: shells pass clean through
@@ -1169,6 +1242,16 @@ function damage(t, by) {
     shake = 14;
     if (gameMode === 'dom') {
       dom.resp[t.id] = 2500; // respawn in 2.5s, match continues
+      return;
+    }
+    if (gameMode === 'egl' && mode === 'bot') {
+      if (by != null && by !== t.id) {
+        scores[by]++;
+        addFloater(W/2, 40, '+1 KILL', tanks[by].color);
+        updateHUD();
+        if (scores[by] >= 10) { killsWin(by); return; }
+      }
+      if (!t.elim) dom.resp[t.id] = 2500;
       return;
     }
     if (gameMode === 'dm' && botSub === 'kills' && mode === 'bot') {
@@ -1325,6 +1408,7 @@ function draw() {
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c]) drawTile(c, r);
   if (gameMode === 'dom') drawZone();
   if (gameMode === 'ctf') drawCTF();
+  if (gameMode === 'egl') drawEagles();
 
   for (const b of bullets) {
     ctx.beginPath();
@@ -1466,6 +1550,44 @@ function draw() {
   ctx.globalAlpha = 1;
   ctx.restore();
   drawAmmo();
+}
+
+function drawEagles() {
+  const eagles = mode === 'online' ? net.eagles : localEagles;
+  if (!eagles) return;
+  eagles.forEach((e, i) => {
+    if (mode === 'online' && (!tanks[i] || tanks[i].gone)) return;
+    const p = eaglePoint(i);
+    const col = mode === 'online' ? PCOLORS[i][0] : tanks[i].color;
+    ctx.save();
+    if (!e.a) { // rubble
+      ctx.fillStyle = '#565b52';
+      ctx.beginPath();
+      ctx.moveTo(p.x - 11, p.y + 9); ctx.lineTo(p.x - 3, p.y + 1); ctx.lineTo(p.x + 3, p.y + 5);
+      ctx.lineTo(p.x + 11, p.y + 9); ctx.closePath(); ctx.fill();
+      ctx.restore();
+      return;
+    }
+    ctx.fillStyle = '#3a4032';
+    ctx.fillRect(p.x - 9, p.y + 4, 18, 6);
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y - 2);
+    ctx.lineTo(p.x - 12, p.y - 9); ctx.lineTo(p.x - 4, p.y + 1);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath();
+    ctx.moveTo(p.x, p.y - 2);
+    ctx.lineTo(p.x + 12, p.y - 9); ctx.lineTo(p.x + 4, p.y + 1);
+    ctx.closePath(); ctx.fill();
+    ctx.beginPath(); ctx.ellipse(p.x, p.y, 3.5, 6, 0, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(p.x, p.y - 7, 2.6, 0, Math.PI * 2); ctx.fill();
+    const frac = Math.max(0, e.h != null ? e.h / 30 : 1);
+    ctx.fillStyle = 'rgba(0,0,0,.45)';
+    ctx.fillRect(p.x - 12, p.y + 12, 24, 3);
+    ctx.fillStyle = frac > 0.35 ? col : '#e05555';
+    ctx.fillRect(p.x - 12, p.y + 12, 24 * frac, 3);
+    ctx.restore();
+  });
 }
 
 function drawFlagIcon(x, y, color, alpha) {
@@ -1624,6 +1746,8 @@ function newRound(keepDomPoints) {
   localFlags = gameMode === 'ctf'
     ? [0, 1].map(i => { const sp = spawnPoint(i); return { s: 0, x: sp.x, y: sp.y, b: -1, dropT: 0 }; })
     : null;
+  localEagles = gameMode === 'egl' ? [{ h: 30, a: true }, { h: 30, a: true }] : null;
+  tanks.forEach(t => t.elim = false);
   bot.path = []; bot.repath = 0; bot.reverseT = 0; bot.stuckT = 0;
   bot.lastX = tanks[1].x; bot.lastY = tanks[1].y;
   state = 'countdown';
@@ -1671,6 +1795,7 @@ function buildHUD() {
 }
 
 function onlineRoundLabel() {
+  if (gameMode === 'egl') return 'EAGLE WAR · 10 KILLS OR RAZE THE BASES';
   if (gameMode === 'ctf') return 'CAPTURE THE FLAG · FIRST TO ' + (net.roster ? net.roster.length * 25 : 100);
   if (gameMode === 'dom') return 'DOMINATION · FIRST TO 100';
   if (net.sub === 'kills') return 'FIRST TO 10 KILLS';
@@ -1715,7 +1840,8 @@ function updateHUD() {
     document.getElementById('score1').textContent = scores[0];
     document.getElementById('score2').textContent = scores[1];
     document.getElementById('roundLabel').textContent =
-      (gameMode === 'dm' && botSub === 'kills' && mode === 'bot') ? 'FIRST TO 10 KILLS' : 'ROUND ' + round;
+      gameMode === 'egl' ? '10 KILLS OR RAZE THE EAGLE'
+      : (gameMode === 'dm' && botSub === 'kills' && mode === 'bot') ? 'FIRST TO 10 KILLS' : 'ROUND ' + round;
   }
   [0,1].forEach(i => {
     const el = document.getElementById('hp' + (i+1));
@@ -1747,9 +1873,19 @@ function setStatus(s) { document.getElementById('netStatus').textContent = s; }
 const $ = id => document.getElementById(id);
 let botSub = 'last'; // deathmatch ruleset vs the bot
 
+$('pickEgl').onclick = () => {
+  gameMode = 'egl';
+  $('pickEgl').classList.add('sel');
+  $('pickDM').classList.remove('sel');
+  $('pickDom').classList.remove('sel');
+  $('pickCTF').classList.remove('sel');
+  $('dmSubRow').style.display = 'none';
+};
+
 $('pickCTF').onclick = () => {
   gameMode = 'ctf';
   $('pickCTF').classList.add('sel');
+  $('pickEgl').classList.remove('sel');
   $('pickDM').classList.remove('sel');
   $('pickDom').classList.remove('sel');
   $('dmSubRow').style.display = 'none';
@@ -1765,6 +1901,7 @@ subBtns.forEach(id => {
 $('pickDM').onclick = () => {
   gameMode = 'dm';
   $('pickDM').classList.add('sel');
+  $('pickEgl').classList.remove('sel');
   $('pickDom').classList.remove('sel');
   $('pickCTF').classList.remove('sel');
   $('dmSubRow').style.display = '';
@@ -1772,6 +1909,7 @@ $('pickDM').onclick = () => {
 $('pickDom').onclick = () => {
   gameMode = 'dom';
   $('pickDom').classList.add('sel');
+  $('pickEgl').classList.remove('sel');
   $('pickDM').classList.remove('sel');
   $('pickCTF').classList.remove('sel');
   $('dmSubRow').style.display = 'none';
@@ -1941,6 +2079,20 @@ function updateMyShells(dt) {
       } else { b.x = nx; b.y = ny; }
     }
     if (removed) continue;
+    if (gameMode === 'egl' && net.eagles) {
+      for (let ei = 0; ei < net.eagles.length && !removed; ei++) {
+        if (!net.eagles[ei].a) continue;
+        if (ei === net.idx) continue;
+        if (net.tm && net.roster && net.roster[ei].team === net.roster[net.idx].team) continue;
+        const ep = eaglePoint(ei);
+        if ((ep.x-b.x)**2 + (ep.y-b.y)**2 < 15*15) {
+          myShells.splice(si, 1); removed = true;
+          sparks(ep.x, ep.y, PCOLORS[ei][0], 5);
+          netSendRaw({ t: 'eagle', tgt: ei });
+        }
+      }
+      if (removed) continue;
+    }
     for (const t of tanks) {
       if (!t.alive || t.gone) continue;
       if (t.inv > 0) continue; // spawn shield: shells pass clean through
@@ -2041,6 +2193,13 @@ function loopStep(now) {
         updateCTFLocal(dt);
         for (const i of [0, 1]) {
           if (!tanks[i].alive) {
+            dom.resp[i] -= dt;
+            if (dom.resp[i] <= 0) respawn(i);
+          }
+        }
+      } else if (gameMode === 'egl') {
+        for (const i of [0, 1]) {
+          if (!tanks[i].alive && !tanks[i].elim) {
             dom.resp[i] -= dt;
             if (dom.resp[i] <= 0) respawn(i);
           }
