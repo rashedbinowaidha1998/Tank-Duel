@@ -20,7 +20,7 @@ const server = http.createServer((req, res) => {
 // ---------- GAME CONSTANTS (mirror the client exactly) ----------
 const TILE = 32, COLS = 28, ROWS = 18;
 const W = COLS * TILE, H = ROWS * TILE;
-const T_RADIUS = 13, T_SPEED = 3.2, T_TURN = 0.065, T_TURRET = 0.088; // 1.4x tuned
+const T_RADIUS = 13, T_SPEED = 4.0, T_TURN = 0.075, T_TURRET = 0.10; // fast & furious (must match client)
 const COLORS = ['#ffa62e', '#3ed6c0', '#c08cff', '#9df06b'];
 const KILL_TARGET = 10;
 
