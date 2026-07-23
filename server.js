@@ -85,13 +85,13 @@ function genMap(gm) {
 
 // ---------- GAME SIMULATION ----------
 class Game {
-  // cfg: { n, tm (teams mode), teams [per player], gm 'dm'|'dom', sub 'last'|'first'|'kills' }
+  // cfg: { n, tm (teams mode), teams [per player], gm 'dm'|'dom'|'ctf', sub 'last'|'kills' }
   constructor(cfg) {
     this.n = cfg.n;
     this.tm = !!cfg.tm;
     this.teams = cfg.teams.slice(0, this.n);
     this.gm = ['dom','ctf'].includes(cfg.gm) ? cfg.gm : 'dm';
-    this.sub = ['last','first','kills'].includes(cfg.sub) ? cfg.sub : 'last';
+    this.sub = ['last','kills'].includes(cfg.sub) ? cfg.sub : 'last';
     this.sideCount = this.tm ? 2 : this.n;
     this.ctfTarget = this.n * 25; // capture-the-flag win line: 25 points per player in the room
     this.scores = Array(this.n).fill(0);
@@ -267,14 +267,7 @@ class Game {
       return;
     }
 
-    if (this.sub === 'first' && enemyKill) {
-      this.winners = this.sideMembers(this.side(by));
-      for (const w of this.winners) this.scores[w]++;
-      this.enterRoundOver();
-      return;
-    }
-
-    // 'last' (and 'first' after a self/team kill): elimination until one side remains
+    // 'last': elimination until one side remains
     const aliveSides = new Set(this.tanks.filter(x => x.alive && !x.gone).map(x => this.side(x.id)));
     if (aliveSides.size <= 1) {
       const s = aliveSides.size === 1 ? [...aliveSides][0] : (by != null ? this.side(by) : this.side(t.id));
@@ -583,7 +576,7 @@ wss.on('connection', ws => {
     } else if (m.t === 'set') {
       if (!room || room.started || ws.idx !== 0) return;
       if (m.k === 'gm' && ['dm','dom','ctf'].includes(m.v)) room.set.gm = m.v;
-      if (m.k === 'sub' && ['last','first','kills'].includes(m.v)) room.set.sub = m.v;
+      if (m.k === 'sub' && ['last','kills'].includes(m.v)) room.set.sub = m.v;
       if (m.k === 'tm') {
         room.set.tm = !!m.v;
         room.teams = room.teams.map((_, i) => room.set.tm ? i % 2 : 0);
