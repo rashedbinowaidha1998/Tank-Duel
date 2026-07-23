@@ -93,6 +93,7 @@ class Game {
     this.gm = ['dom','ctf'].includes(cfg.gm) ? cfg.gm : 'dm';
     this.sub = ['last','first','kills'].includes(cfg.sub) ? cfg.sub : 'last';
     this.sideCount = this.tm ? 2 : this.n;
+    this.ctfTarget = this.n * 25; // capture-the-flag win line: 25 points per player in the room
     this.scores = Array(this.n).fill(0);
     this.round = 1;
     this.winners = [];
@@ -126,7 +127,7 @@ class Game {
       const s = spawnPoint(i);
       const p = prev[i] || {};
       const t = { id: i, x: s.x, y: s.y, angle: s.a, turret: s.a,
-                  hp: 3, alive: !p.gone, gone: !!p.gone, type: p.type || 'gunner' };
+                  hp: 3, alive: !p.gone, gone: !!p.gone, type: p.type || 'gunner', inv: 0 };
       this.tanks.push(t);
     }
     this.shells = Array.from({ length: this.n }, () => []);
@@ -181,6 +182,11 @@ class Game {
     const k = dt / 16.667;
     const c = this.inputs[t.id] || {};
     if (c.ty && t.type !== c.ty) t.type = c.ty;
+    if (t.inv > 0) {
+      t.inv -= dt;
+      if ((c.fwd || c.back) && t.inv > 1000) t.inv = 1000; // moving forfeits most of the shield
+      if (t.inv < 0) t.inv = 0;
+    }
     if (c.left) { t.angle -= T_TURN * k; if (t.type === 'gunner') t.turret -= T_TURN * k; }
     if (c.right) { t.angle += T_TURN * k; if (t.type === 'gunner') t.turret += T_TURN * k; }
     if (t.type === 'gunner') {
@@ -235,7 +241,7 @@ class Game {
       if (enemyKill) {
         this.scores[by] += 2;
         this.ev({ e: 'kp', w: by });
-        if (this.sideScore(by) >= 100) {
+        if (this.sideScore(by) >= this.ctfTarget) {
           this.winners = this.sideMembers(this.side(by));
           this.matchOver = true;
           this.enterRoundOver();
@@ -288,6 +294,7 @@ class Game {
     if (t.gone) return;
     t.x = s.x; t.y = s.y; t.angle = s.a; t.turret = s.a;
     t.hp = 3; t.alive = true;
+    t.inv = 3000; // spawn shield: 3s, cut to 1s left the moment you drive
     this.ev({ e: 'sp', x: s.x | 0, y: s.y | 0, c: COLORS[i], n: 12 });
   }
 
@@ -369,7 +376,7 @@ class Game {
         f.st = 0; f.by = -1; f.x = so.x; f.y = so.y;
       }
       this.ev({ e: 'cap2', x: sp.x | 0, y: sp.y | 0, w: t.id, k: carried.length, p: pts });
-      if (this.sideScore(t.id) >= 100) {
+      if (this.sideScore(t.id) >= this.ctfTarget) {
         this.winners = this.sideMembers(this.side(t.id));
         this.matchOver = true;
         this.enterRoundOver();
@@ -448,7 +455,7 @@ class Game {
         x: +t.x.toFixed(1), y: +t.y.toFixed(1),
         a: +t.angle.toFixed(3), tu: +t.turret.toFixed(3),
         ty: t.type, hp: t.hp, al: t.alive ? 1 : 0, gn: t.gone ? 1 : 0,
-        am: this.ammoRep[t.id]
+        am: this.ammoRep[t.id], iv: t.inv > 0 ? (t.inv | 0) : 0
       })),
       bl,
       ev: this.events.splice(0)
@@ -607,6 +614,7 @@ wss.on('connection', ws => {
       if (ti < 0 || ti >= g.n) return;
       const tgt = g.tanks[ti];
       if (!tgt || !tgt.alive || tgt.gone) return;
+      if (tgt.inv > 0) return; // spawn shield: the referee waves it off
       // no friendly fire (self-hits allowed)
       if (ti !== ws.idx && g.side(ti) === g.side(ws.idx)) return;
       g.damage(tgt, ws.idx);
