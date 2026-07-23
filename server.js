@@ -90,7 +90,7 @@ class Game {
     this.n = cfg.n;
     this.tm = !!cfg.tm;
     this.teams = cfg.teams.slice(0, this.n);
-    this.gm = cfg.gm === 'dom' ? 'dom' : 'dm';
+    this.gm = ['dom','ctf'].includes(cfg.gm) ? cfg.gm : 'dm';
     this.sub = ['last','first','kills'].includes(cfg.sub) ? cfg.sub : 'last';
     this.sideCount = this.tm ? 2 : this.n;
     this.scores = Array(this.n).fill(0);
@@ -108,12 +108,15 @@ class Game {
   }
 
   side(i) { return this.tm ? this.teams[i] : i; }
+  sideScore(i) {
+    return this.sideMembers(this.side(i)).reduce((a, j) => a + this.scores[j], 0);
+  }
   sideMembers(s) {
     const out = [];
     for (let i = 0; i < this.n; i++) if (this.side(i) === s) out.push(i);
     return out;
   }
-  respawnable() { return this.gm === 'dom' || this.sub === 'kills'; }
+  respawnable() { return this.gm === 'dom' || this.gm === 'ctf' || this.sub === 'kills'; }
 
   newRound(keepDomPoints) {
     const prev = this.tanks || [];
@@ -131,6 +134,12 @@ class Game {
     this.dom.owner = -1;
     this.resp = Array(this.n).fill(0);
     if (!keepDomPoints) this.dom.pts = Array(this.sideCount).fill(0);
+    this.flags = this.gm === 'ctf'
+      ? Array.from({ length: this.n }, (_, i) => {
+          const sp = spawnPoint(i);
+          return { st: 0, x: sp.x, y: sp.y, by: -1, dropT: 0 }; // 0 home, 1 carried, 2 dropped
+        })
+      : null;
     this.winners = [];
     this.state = 'countdown';
     this.countdownT = 3600;
@@ -215,6 +224,28 @@ class Game {
 
     const enemyKill = by != null && this.side(by) !== this.side(t.id);
 
+    if (this.gm === 'ctf') {
+      // the fallen drop everything they were carrying
+      for (const f of this.flags) {
+        if (f.st === 1 && f.by === t.id) {
+          f.st = 2; f.by = -1; f.x = t.x; f.y = t.y; f.dropT = 15000;
+          this.ev({ e: 'fd', x: t.x | 0, y: t.y | 0 });
+        }
+      }
+      if (enemyKill) {
+        this.scores[by] += 2;
+        this.ev({ e: 'kp', w: by });
+        if (this.sideScore(by) >= 100) {
+          this.winners = this.sideMembers(this.side(by));
+          this.matchOver = true;
+          this.enterRoundOver();
+          return;
+        }
+      }
+      this.resp[t.id] = 2500;
+      return;
+    }
+
     if (this.sub === 'kills') {
       if (enemyKill) {
         this.scores[by]++;
@@ -291,6 +322,67 @@ class Game {
     }
   }
 
+  updateCTF(dt) {
+    const BASE_R = TILE * 1.3, TOUCH_R = T_RADIUS + 9;
+    for (let o = 0; o < this.n; o++) {
+      const f = this.flags[o];
+      if (f.st === 1) { // carried: rides the carrier
+        const c = this.tanks[f.by];
+        if (!c || !c.alive || c.gone) { f.st = 2; f.by = -1; f.dropT = 15000; }
+        else { f.x = c.x; f.y = c.y; }
+        continue;
+      }
+      if (f.st === 2) {
+        f.dropT -= dt;
+        if (f.dropT <= 0) { // untouched too long: flies home
+          const sp = spawnPoint(o);
+          f.st = 0; f.x = sp.x; f.y = sp.y;
+          this.ev({ e: 'fr', x: sp.x | 0, y: sp.y | 0, c: COLORS[o] });
+          continue;
+        }
+      }
+      for (const t of this.tanks) {
+        if (!t.alive || t.gone) continue;
+        if (Math.hypot(t.x - f.x, t.y - f.y) > TOUCH_R) continue;
+        if (this.side(t.id) === this.side(o)) {
+          if (f.st === 2) { // friendly touch returns a dropped flag
+            const sp = spawnPoint(o);
+            f.st = 0; f.x = sp.x; f.y = sp.y;
+            this.ev({ e: 'fr', x: sp.x | 0, y: sp.y | 0, c: COLORS[o] });
+            break;
+          }
+          // friendly touch on a home flag: nothing — keep scanning for enemies
+        } else { // touched by an enemy: stolen
+          f.st = 1; f.by = t.id; f.x = t.x; f.y = t.y;
+          this.ev({ e: 'fg', x: t.x | 0, y: t.y | 0, c: COLORS[o] });
+          break;
+        }
+      }
+    }
+    // deliveries: carrier reaches their own base
+    for (const t of this.tanks) {
+      if (!t.alive || t.gone) continue;
+      const sp = spawnPoint(t.id);
+      if (Math.hypot(t.x - sp.x, t.y - sp.y) > BASE_R) continue;
+      const carried = this.flags.filter(f => f.st === 1 && f.by === t.id);
+      if (!carried.length) continue;
+      const pts = carried.length === 1 ? 10 : carried.length === 2 ? 30 : 90;
+      this.scores[t.id] += pts;
+      for (const f of carried) {
+        const o = this.flags.indexOf(f);
+        const so = spawnPoint(o);
+        f.st = 0; f.by = -1; f.x = so.x; f.y = so.y;
+      }
+      this.ev({ e: 'cap2', x: sp.x | 0, y: sp.y | 0, w: t.id, k: carried.length, p: pts });
+      if (this.sideScore(t.id) >= 100) {
+        this.winners = this.sideMembers(this.side(t.id));
+        this.matchOver = true;
+        this.enterRoundOver();
+        return;
+      }
+    }
+  }
+
   tick(dt) {
     if (this.state === 'countdown') {
       this.countdownT -= dt;
@@ -298,6 +390,7 @@ class Game {
     } else if (this.state === 'play') {
       for (const t of this.tanks) this.updateTank(t, dt);
       if (this.gm === 'dom') this.updateDom(dt);
+      if (this.gm === 'ctf') this.updateCTF(dt);
       if (this.respawnable()) {
         for (let i = 0; i < this.n; i++) {
           if (!this.tanks[i].alive && !this.tanks[i].gone) {
@@ -354,6 +447,7 @@ class Game {
         ? { p: this.dom.pts.map(x => Math.floor(x)), c: this.dom.cap.map(x => +x.toFixed(1)), o: this.dom.owner }
         : null,
       rs: this.resp.map(x => Math.max(0, x | 0)),
+      fg: this.gm === 'ctf' ? this.flags.map(f => ({ s: f.st, x: f.x | 0, y: f.y | 0, b: f.by })) : null,
       g: this.grid.flat().join(''),
       tk: this.tanks.map(t => ({
         x: +t.x.toFixed(1), y: +t.y.toFixed(1),
@@ -448,7 +542,7 @@ wss.on('connection', ws => {
       const code = genCode();
       rooms.set(code, {
         code, clients: [ws], names: ['Player 1'], teams: [0],
-        set: { gm: ['dm','dom'].includes(m.gm) ? m.gm : 'dm', sub: 'last', tm: false },
+        set: { gm: ['dm','dom','ctf'].includes(m.gm) ? m.gm : 'dm', sub: 'last', tm: false },
         started: false, game: null, timer: null, pings: [0,0,0,0], q: 0
       });
       ws.room = code; ws.idx = 0;
@@ -486,7 +580,7 @@ wss.on('connection', ws => {
 
     } else if (m.t === 'set') {
       if (!room || room.started || ws.idx !== 0) return;
-      if (m.k === 'gm' && ['dm','dom'].includes(m.v)) room.set.gm = m.v;
+      if (m.k === 'gm' && ['dm','dom','ctf'].includes(m.v)) room.set.gm = m.v;
       if (m.k === 'sub' && ['last','first','kills'].includes(m.v)) room.set.sub = m.v;
       if (m.k === 'tm') {
         room.set.tm = !!m.v;
