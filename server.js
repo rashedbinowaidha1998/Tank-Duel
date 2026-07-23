@@ -122,7 +122,7 @@ class Game {
       const s = spawnPoint(i);
       const p = prev[i] || {};
       const t = { id: i, x: s.x, y: s.y, angle: s.a, turret: s.a,
-                  hp: 3, alive: !p.gone, gone: !!p.gone, type: p.type || 'classic' };
+                  hp: 3, alive: !p.gone, gone: !!p.gone, type: p.type || 'gunner' };
       this.tanks.push(t);
     }
     this.shells = Array.from({ length: this.n }, () => []);
