@@ -34,6 +34,15 @@ function spawnPoint(i) {
   return pts[i];
 }
 
+function isDom(gm) { return gm === 'dom' || gm === 'dom2'; }
+function domZonePts(gm) {
+  if (gm === 'dom2') return [
+    { x: Math.round(W * 0.32), y: Math.round(H * 0.35) },
+    { x: Math.round(W * 0.68), y: Math.round(H * 0.65) },
+  ];
+  return [{ x: W / 2, y: H / 2 }];
+}
+
 function eaglePoint(i) {
   const pts = [
     { x: 1*TILE + TILE/2, y: 1*TILE + TILE/2 },
@@ -71,10 +80,13 @@ function genMap(gm) {
   // all four corners are spawn zones now
   clearZone(2, 2); clearZone(COLS-3, ROWS-3);
   clearZone(COLS-3, 2); clearZone(2, ROWS-3);
-  if (gm === 'dom') {
-    for (let r = 1; r < ROWS-1; r++) for (let c = 1; c < COLS-1; c++) {
-      const dx = (c + 0.5) - COLS/2, dy = (r + 0.5) - ROWS/2;
-      if (dx*dx + dy*dy < 2.4*2.4) g[r][c] = 0;
+  if (isDom(gm)) {
+    for (const z of domZonePts(gm)) {
+      const zc = z.x / TILE, zr = z.y / TILE;
+      for (let r = 1; r < ROWS-1; r++) for (let c = 1; c < COLS-1; c++) {
+        const dx = (c + 0.5) - zc, dy = (r + 0.5) - zr;
+        if (dx*dx + dy*dy < 2.4*2.4) g[r][c] = 0;
+      }
     }
   }
   const seen = Array.from({length: ROWS}, () => Array(COLS).fill(false));
@@ -89,7 +101,11 @@ function genMap(gm) {
     });
   }
   if (!seen[ROWS-3][COLS-3] || !seen[2][COLS-3] || !seen[ROWS-3][2]) return genMap(gm);
-  if (gm === 'dom' && !seen[Math.floor(ROWS/2)][Math.floor(COLS/2)]) return genMap(gm);
+  if (isDom(gm)) {
+    for (const z of domZonePts(gm)) {
+      if (!seen[Math.floor(z.y / TILE)][Math.floor(z.x / TILE)]) return genMap(gm);
+    }
+  }
   return g;
 }
 
@@ -100,7 +116,7 @@ class Game {
     this.n = cfg.n;
     this.tm = !!cfg.tm;
     this.teams = cfg.teams.slice(0, this.n);
-    this.gm = ['dom','ctf','egl'].includes(cfg.gm) ? cfg.gm : 'dm';
+    this.gm = ['dom','dom2','ctf','egl'].includes(cfg.gm) ? cfg.gm : 'dm';
     this.sub = ['last','kills'].includes(cfg.sub) ? cfg.sub : 'last';
     this.sideCount = this.tm ? 2 : this.n;
     this.ctfTarget = this.n * 25; // capture-the-flag win line: 25 points per player in the room
@@ -112,8 +128,7 @@ class Game {
     this.ammoRep = Array(this.n).fill(5); // each player's self-reported magazine
     this.shells = Array.from({ length: this.n }, () => []);
     this.events = [];
-    this.dom = { pts: Array(this.sideCount).fill(0), cap: Array(this.sideCount).fill(0),
-                 owner: -1, zone: { x: W/2, y: H/2, r: TILE*2 } };
+    this.dom = { pts: Array(this.sideCount).fill(0), zones: [] };
     this.resp = Array(this.n).fill(0);
     this.newRound(true);
   }
@@ -127,7 +142,7 @@ class Game {
     for (let i = 0; i < this.n; i++) if (this.side(i) === s) out.push(i);
     return out;
   }
-  respawnable() { return this.gm === 'dom' || this.gm === 'ctf' || this.gm === 'egl' || this.sub === 'kills'; }
+  respawnable() { return isDom(this.gm) || this.gm === 'ctf' || this.gm === 'egl' || this.sub === 'kills'; }
 
   newRound(keepDomPoints) {
     const prev = this.tanks || [];
@@ -142,8 +157,10 @@ class Game {
       this.tanks.push(t);
     }
     this.shells = Array.from({ length: this.n }, () => []);
-    this.dom.cap = Array(this.sideCount).fill(0);
-    this.dom.owner = -1;
+    this.dom.zones = isDom(this.gm)
+      ? domZonePts(this.gm).map(z => ({ x: z.x, y: z.y, r: TILE * 2,
+          owner: -1, cap: Array(this.sideCount).fill(0) }))
+      : [];
     this.resp = Array(this.n).fill(0);
     if (!keepDomPoints) this.dom.pts = Array(this.sideCount).fill(0);
     this.eagles = this.gm === 'egl'
@@ -240,7 +257,7 @@ class Game {
     t.alive = false;
     this.ev({ e: 'bm', x: t.x | 0, y: t.y | 0, c: COLORS[t.id] });
 
-    if (this.gm === 'dom') { this.resp[t.id] = 2500; return; }
+    if (isDom(this.gm)) { this.resp[t.id] = 2500; return; }
 
     const enemyKill = by != null && this.side(by) !== this.side(t.id);
 
@@ -321,32 +338,35 @@ class Game {
   }
 
   updateDom(dt) {
-    const z = this.dom.zone;
-    const insideSide = Array(this.sideCount).fill(false);
-    for (const t of this.tanks) {
-      if (t.alive && !t.gone && Math.hypot(t.x - z.x, t.y - z.y) < z.r) insideSide[this.side(t.id)] = true;
-    }
-    const sidesIn = insideSide.filter(Boolean).length;
+    for (const z of this.dom.zones) {
+      const insideSide = Array(this.sideCount).fill(false);
+      for (const t of this.tanks) {
+        if (t.alive && !t.gone && Math.hypot(t.x - z.x, t.y - z.y) < z.r) insideSide[this.side(t.id)] = true;
+      }
+      const sidesIn = insideSide.filter(Boolean).length;
 
-    if (this.dom.owner !== -1) {
-      this.dom.pts[this.dom.owner] = Math.min(100, this.dom.pts[this.dom.owner] + dt / 1000);
-      if (this.dom.pts[this.dom.owner] >= 100) {
-        this.winners = this.sideMembers(this.dom.owner);
+      if (z.owner !== -1) {
+        this.dom.pts[z.owner] = Math.min(100, this.dom.pts[z.owner] + dt / 1000);
+      }
+
+      for (let s = 0; s < this.sideCount; s++) {
+        if (s === z.owner) { z.cap[s] = 0; continue; }
+        if (insideSide[s] && sidesIn === 1) z.cap[s] = Math.min(100, z.cap[s] + 25 * dt / 1000);
+        else if (!insideSide[s]) z.cap[s] = Math.max(0, z.cap[s] - 12.5 * dt / 1000);
+        // multiple sides inside -> contested, meters freeze
+        if (z.cap[s] >= 100) {
+          z.cap = Array(this.sideCount).fill(0);
+          z.owner = s;
+          this.ev({ e: 'cp', w: s, x: z.x | 0, y: z.y | 0 });
+        }
+      }
+    }
+    for (let s = 0; s < this.sideCount; s++) {
+      if (this.dom.pts[s] >= 100) {
+        this.winners = this.sideMembers(s);
         this.matchOver = true;
         this.enterRoundOver();
         return;
-      }
-    }
-
-    for (let s = 0; s < this.sideCount; s++) {
-      if (s === this.dom.owner) { this.dom.cap[s] = 0; continue; }
-      if (insideSide[s] && sidesIn === 1) this.dom.cap[s] = Math.min(100, this.dom.cap[s] + 25 * dt / 1000);
-      else if (!insideSide[s]) this.dom.cap[s] = Math.max(0, this.dom.cap[s] - 12.5 * dt / 1000);
-      // multiple sides inside -> contested, meters freeze
-      if (this.dom.cap[s] >= 100) {
-        this.dom.cap = Array(this.sideCount).fill(0);
-        this.dom.owner = s;
-        this.ev({ e: 'cp', w: s });
       }
     }
   }
@@ -413,7 +433,7 @@ class Game {
       if (this.countdownT <= 0) this.state = 'play';
     } else if (this.state === 'play') {
       for (const t of this.tanks) this.updateTank(t, dt);
-      if (this.gm === 'dom') this.updateDom(dt);
+      if (isDom(this.gm)) this.updateDom(dt);
       if (this.gm === 'ctf') this.updateCTF(dt);
       if (this.respawnable()) {
         for (let i = 0; i < this.n; i++) {
@@ -428,7 +448,7 @@ class Game {
         const adv = !!(this.inputs[i] && this.inputs[i].adv);
         if (adv && !this.prevAdv[i]) {
           if (this.matchOver) this.freshMatch();
-          else { this.round++; this.newRound(this.gm === 'dom'); }
+          else { this.round++; this.newRound(isDom(this.gm)); }
           return;
         }
         this.prevAdv[i] = adv;
@@ -499,8 +519,9 @@ class Game {
       rd: this.round, sc: this.scores.map(x => Math.floor(x)),
       wi: this.winners, mo: this.matchOver ? 1 : 0,
       gm: this.gm, sub: this.sub, tm: this.tm ? 1 : 0,
-      dm: this.gm === 'dom'
-        ? { p: this.dom.pts.map(x => Math.floor(x)), c: this.dom.cap.map(x => +x.toFixed(1)), o: this.dom.owner }
+      dm: isDom(this.gm)
+        ? { p: this.dom.pts.map(x => Math.floor(x)),
+            z: this.dom.zones.map(z => ({ x: z.x | 0, y: z.y | 0, c: z.cap.map(v => +v.toFixed(1)), o: z.owner })) }
         : null,
       rs: this.resp.map(x => Math.max(0, x | 0)),
       fg: this.gm === 'ctf' ? this.flags.map(f => ({ s: f.st, x: f.x | 0, y: f.y | 0, b: f.by })) : null,
@@ -599,7 +620,7 @@ wss.on('connection', ws => {
       const code = genCode();
       rooms.set(code, {
         code, clients: [ws], names: ['Player 1'], teams: [0],
-        set: { gm: ['dm','dom','ctf','egl'].includes(m.gm) ? m.gm : 'dm', sub: 'last', tm: false },
+        set: { gm: ['dm','dom','dom2','ctf','egl'].includes(m.gm) ? m.gm : 'dm', sub: 'last', tm: false },
         started: false, game: null, timer: null, pings: [0,0,0,0], q: 0
       });
       ws.room = code; ws.idx = 0;
@@ -637,7 +658,7 @@ wss.on('connection', ws => {
 
     } else if (m.t === 'set') {
       if (!room || room.started || ws.idx !== 0) return;
-      if (m.k === 'gm' && ['dm','dom','ctf','egl'].includes(m.v)) room.set.gm = m.v;
+      if (m.k === 'gm' && ['dm','dom','dom2','ctf','egl'].includes(m.v)) room.set.gm = m.v;
       if (m.k === 'sub' && ['last','kills'].includes(m.v)) room.set.sub = m.v;
       if (m.k === 'tm') {
         room.set.tm = !!m.v;
@@ -676,7 +697,7 @@ wss.on('connection', ws => {
 
     } else if (m.t === 'cmd') {
       if (!room || !room.game || ws.idx !== 0) return;
-      if (m.c === 'newmap') room.game.newRound(room.game.gm === 'dom');
+      if (m.c === 'newmap') room.game.newRound(isDom(room.game.gm));
       else if (m.c === 'reset') room.game.freshMatch();
 
     } else if (m.t === 'eagle') {
