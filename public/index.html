@@ -488,7 +488,19 @@ function showLobby() {
       nameBox.textContent = p.n;
     }
     row.appendChild(nameBox);
-    if (i === 0) {
+    if (p.bt) {
+      const h = document.createElement('span');
+      h.className = 'lhost';
+      h.textContent = '🤖 BOT';
+      row.appendChild(h);
+      if (net.idx === 0) {
+        const x = document.createElement('span');
+        x.textContent = '✕';
+        x.style.cssText = 'cursor:pointer;color:#e05555;font-weight:900;padding:0 4px';
+        x.onclick = () => netSendRaw({ t: 'rmbot', who: i });
+        row.appendChild(x);
+      }
+    } else if (i === 0) {
       const h = document.createElement('span');
       h.className = 'lhost';
       h.textContent = 'HOST';
@@ -534,6 +546,15 @@ function showLobby() {
   g3.append(mkBtn('FREE-FOR-ALL', !L.set.tm, () => netSendRaw({ t: 'set', k: 'tm', v: false })));
   g3.append(mkBtn('TEAMS', L.set.tm, () => netSendRaw({ t: 'set', k: 'tm', v: true })));
   set.append(g3);
+
+  if (net.idx === 0 && L.pl.length < 4) {
+    const addRow = document.createElement('div');
+    addRow.className = 'lrow';
+    addRow.style.cssText = 'justify-content:center;cursor:pointer;opacity:.8';
+    addRow.textContent = '+ ADD BOT';
+    addRow.onclick = () => netSendRaw({ t: 'addbot' });
+    list.appendChild(addRow);
+  }
 
   const btnS = document.getElementById('btnStart');
   btnS.style.display = net.idx === 0 ? '' : 'none';
@@ -1033,7 +1054,7 @@ function fire(t) {
     id: ++bulletSeq,
     x: mx, y: my,
     vx: Math.cos(t.turret) * 9.8, vy: Math.sin(t.turret) * 9.8,
-    owner: t.id, bounces: 2, grace: 160, life: 4200
+    owner: t.id, bounces: 1, grace: 160, life: 4200
   });
   muzzleFx(mx, my, t.turret);
   netEv({ e: 'mz', x: mx | 0, y: my | 0, a: +t.turret.toFixed(2) });
@@ -2077,7 +2098,7 @@ function predictOwnTank(t, dt) {
     const my = t.y + Math.sin(t.turret) * 20;
     myShells.push({ i: ++myShellSeq, x: mx, y: my,
       vx: Math.cos(t.turret) * 9.8, vy: Math.sin(t.turret) * 9.8,
-      bounces: 2, grace: 160, life: 4200 });
+      bounces: 1, grace: 160, life: 4200 });
     muzzleFx(mx, my, t.turret);
   }
 
