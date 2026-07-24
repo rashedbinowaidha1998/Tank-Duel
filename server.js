@@ -126,6 +126,13 @@ class Game {
     this.matchOver = false;
     this.inputs = Array.from({ length: this.n }, () => ({}));
     this.ammoRep = Array(this.n).fill(5); // each player's self-reported magazine
+    this.bots = (cfg.bots || []).slice(0, this.n);
+    this.botState = {};
+    this.botShells = [];
+    for (let i = 0; i < this.n; i++) {
+      if (this.bots[i]) this.botState[i] = { path: [], repath: 0, jitT: 0, aimJit: 0,
+        reverseT: 0, stuckT: 0, lastX: 0, lastY: 0, cooldown: 0, ammo: 5, shellSeq: 0 };
+    }
     this.shells = Array.from({ length: this.n }, () => []);
     this.events = [];
     this.dom = { pts: Array(this.sideCount).fill(0), zones: [] };
@@ -163,6 +170,8 @@ class Game {
       : [];
     this.resp = Array(this.n).fill(0);
     if (!keepDomPoints) this.dom.pts = Array(this.sideCount).fill(0);
+    this.botShells = [];
+    for (const k in this.botState) { this.botState[k].path = []; this.botState[k].repath = 0; }
     this.eagles = this.gm === 'egl'
       ? Array.from({ length: this.n }, (_, i) => ({ hp: 30, alive: true }))
       : null;
@@ -427,12 +436,248 @@ class Game {
     }
   }
 
+  lineOfSight(x0, y0, x1, y1) {
+    const d = Math.hypot(x1 - x0, y1 - y0);
+    const steps = Math.ceil(d / 8);
+    for (let i = 1; i < steps; i++) {
+      if (this.solidAt(x0 + (x1-x0)*i/steps, y0 + (y1-y0)*i/steps) !== 0) return false;
+    }
+    return true;
+  }
+
+  bfsPath(sc, sr, tc, tr) {
+    const key = (c, r) => r * COLS + c;
+    const prev = new Map([[key(sc, sr), null]]);
+    const q = [[sc, sr]];
+    while (q.length) {
+      const [c, r] = q.shift();
+      if (c === tc && r === tr) {
+        const path = [];
+        let cur = [c, r];
+        while (cur) { path.unshift(cur); cur = prev.get(key(cur[0], cur[1])); }
+        return path;
+      }
+      for (const [dc, dr] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+        const nc = c + dc, nr = r + dr;
+        if (nc < 1 || nr < 1 || nc >= COLS-1 || nr >= ROWS-1) continue;
+        if (this.grid[nr][nc] !== 0 || prev.has(key(nc, nr))) continue;
+        prev.set(key(nc, nr), [c, r]);
+        q.push([nc, nr]);
+      }
+    }
+    return null;
+  }
+
+  updateBotAI(idx, dt) {
+    const t = this.tanks[idx];
+    const st = this.botState[idx];
+    const inp = { fwd: false, back: false, left: false, right: false };
+    this.inputs[idx] = inp;
+    this.ammoRep[idx] = st.ammo;
+    if (!t.alive || t.gone || t.elim || this.state !== 'play') return;
+
+    let enemy = null, distP = 1e9;
+    for (const o of this.tanks) {
+      if (o.id === idx || !o.alive || o.gone || this.side(o.id) === this.side(idx)) continue;
+      const d = Math.hypot(o.x - t.x, o.y - t.y);
+      if (d < distP) { distP = d; enemy = o; }
+    }
+
+    let gx = enemy ? enemy.x : W/2, gy = enemy ? enemy.y : H/2, holdZone = false;
+
+    if (this.gm === 'ctf' && this.flags) {
+      const carrying = this.flags.some(f => f.st === 1 && f.by === idx);
+      let thief = null;
+      for (let o = 0; o < this.n; o++) {
+        const f = this.flags[o];
+        if (this.side(o) === this.side(idx) && f.st === 1) thief = this.tanks[f.by];
+      }
+      if (carrying) { const sp = spawnPoint(idx); gx = sp.x; gy = sp.y; }
+      else if (thief && thief.alive) { gx = thief.x; gy = thief.y; }
+      else {
+        let best = 1e9;
+        for (let o = 0; o < this.n; o++) {
+          const f = this.flags[o];
+          if (this.side(o) === this.side(idx) || f.st === 1) continue;
+          const d = Math.hypot(f.x - t.x, f.y - t.y);
+          if (d < best) { best = d; gx = f.x; gy = f.y; }
+        }
+      }
+    }
+    if (this.gm === 'egl' && this.eagles) {
+      let best = 1e9;
+      for (let o = 0; o < this.n; o++) {
+        if (this.side(o) === this.side(idx) || !this.eagles[o].alive || this.tanks[o].gone) continue;
+        const p = eaglePoint(o);
+        const d = Math.hypot(p.x - t.x, p.y - t.y);
+        if (d < best) { best = d; gx = p.x; gy = p.y; }
+      }
+    }
+    if (isDom(this.gm) && this.dom.zones.length) {
+      let best = null, bestD = 1e9;
+      for (const z of this.dom.zones) {
+        if (z.owner === this.side(idx)) continue;
+        const d = Math.hypot(t.x - z.x, t.y - z.y);
+        if (d < bestD) { bestD = d; best = z; }
+      }
+      if (!best) for (const z of this.dom.zones) {
+        const d = Math.hypot(t.x - z.x, t.y - z.y);
+        if (d < bestD) { bestD = d; best = z; }
+      }
+      gx = best.x; gy = best.y;
+      if (Math.hypot(t.x - best.x, t.y - best.y) < best.r * 0.55) holdZone = true;
+    }
+
+    st.repath -= dt;
+    if (st.repath <= 0) {
+      st.repath = 450;
+      const p = this.bfsPath(
+        Math.floor(t.x / TILE), Math.floor(t.y / TILE),
+        Math.floor(gx / TILE), Math.floor(gy / TILE));
+      st.path = p ? p.slice(1) : [];
+    }
+    let tx = gx, ty = gy;
+    if (st.path.length) {
+      let [c, r] = st.path[0];
+      tx = c * TILE + TILE/2; ty = r * TILE + TILE/2;
+      if (Math.hypot(t.x - tx, t.y - ty) < TILE * 0.55) {
+        st.path.shift();
+        if (st.path.length) {
+          [c, r] = st.path[0];
+          tx = c * TILE + TILE/2; ty = r * TILE + TILE/2;
+        }
+      }
+    }
+
+    const los = enemy && this.lineOfSight(t.x, t.y, enemy.x, enemy.y);
+    let target = (los || (holdZone && enemy))
+      ? Math.atan2(enemy.y - t.y, enemy.x - t.x)
+      : Math.atan2(ty - t.y, tx - t.x);
+
+    st.jitT -= dt;
+    if (st.jitT <= 0) { st.jitT = 350; st.aimJit = (Math.random() - 0.5) * 0.11; }
+    if (los) target += st.aimJit;
+
+    let diff = target - t.angle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    if (diff > 0.06) inp.right = true;
+    else if (diff < -0.06) inp.left = true;
+
+    if (st.reverseT > 0) {
+      st.reverseT -= dt;
+      inp.back = true; inp.right = true;
+    } else if (Math.abs(diff) < 0.9 && !holdZone && !(los && distP < TILE * 3.2 && !isDom(this.gm))) {
+      inp.fwd = true;
+    }
+
+    st.stuckT += dt;
+    if (st.stuckT > 500) {
+      if (inp.fwd && Math.hypot(t.x - st.lastX, t.y - st.lastY) < 4) {
+        st.reverseT = 350;
+        st.repath = 0;
+      }
+      st.lastX = t.x; st.lastY = t.y; st.stuckT = 0;
+    }
+
+    let wantFire = false;
+    if (los && Math.abs(diff) < 0.13 && distP < TILE * 12) wantFire = true;
+    if (this.gm === 'egl' && !los) {
+      let bp = null, bd = 1e9;
+      for (let o = 0; o < this.n; o++) {
+        if (this.side(o) === this.side(idx) || !this.eagles[o].alive || this.tanks[o].gone) continue;
+        const p = eaglePoint(o);
+        const d = Math.hypot(p.x - t.x, p.y - t.y);
+        if (d < bd) { bd = d; bp = p; }
+      }
+      if (bp && this.lineOfSight(t.x, t.y, bp.x, bp.y)) {
+        const ea = Math.atan2(bp.y - t.y, bp.x - t.x);
+        let ed = ea - t.angle;
+        while (ed > Math.PI) ed -= Math.PI * 2;
+        while (ed < -Math.PI) ed += Math.PI * 2;
+        if (ed > 0.05) inp.right = true;
+        else if (ed < -0.05) inp.left = true;
+        if (Math.abs(ed) < 0.12) wantFire = true;
+      }
+    }
+    if (!los && Math.abs(diff) < 0.1) {
+      const fx = t.x + Math.cos(t.angle) * TILE * 1.2;
+      const fy = t.y + Math.sin(t.angle) * TILE * 1.2;
+      if (this.solidAt(fx, fy) === 1) wantFire = true;
+    }
+
+    st.ammo = Math.min(5, st.ammo + dt / 1000);
+    st.cooldown -= dt;
+    if (wantFire && st.cooldown <= 0 && st.ammo >= 1) {
+      st.ammo--;
+      st.cooldown = 500;
+      this.botShells.push({
+        n: ++st.shellSeq, o: idx,
+        x: t.x + Math.cos(t.turret) * 20, y: t.y + Math.sin(t.turret) * 20,
+        vx: Math.cos(t.turret) * 9.8, vy: Math.sin(t.turret) * 9.8,
+        bounces: 1, life: 4200
+      });
+    }
+  }
+
+  updateBotShells(dt) {
+    const k = dt / 16.667;
+    for (let si = this.botShells.length - 1; si >= 0; si--) {
+      const b = this.botShells[si];
+      b.life -= dt;
+      if (b.life <= 0) { this.botShells.splice(si, 1); continue; }
+      let removed = false;
+      for (let stp = 0; stp < 2 && !removed; stp++) {
+        const nx = b.x + b.vx * k / 2, ny = b.y + b.vy * k / 2;
+        const hit = this.solidAt(nx, ny);
+        if (hit !== 0) {
+          const c = Math.floor(nx / TILE), r = Math.floor(ny / TILE);
+          if (hit === 1) {
+            this.grid[r][c] = 0;
+            this.ev({ e: 'br', x: c * TILE + TILE/2, y: r * TILE + TILE/2 });
+            this.botShells.splice(si, 1); removed = true; break;
+          }
+          if (b.bounces <= 0) { this.botShells.splice(si, 1); removed = true; break; }
+          b.bounces--;
+          const hx = this.solidAt(b.x + b.vx * k / 2, b.y) !== 0;
+          const hy = this.solidAt(b.x, b.y + b.vy * k / 2) !== 0;
+          if (hx) b.vx = -b.vx;
+          if (hy) b.vy = -b.vy;
+          if (!hx && !hy) { b.vx = -b.vx; b.vy = -b.vy; }
+        } else { b.x = nx; b.y = ny; }
+      }
+      if (removed) continue;
+      if (this.gm === 'egl' && this.eagles) {
+        for (let o = 0; o < this.n && !removed; o++) {
+          if (this.side(o) === this.side(b.o) || !this.eagles[o].alive) continue;
+          const p = eaglePoint(o);
+          if ((p.x-b.x)**2 + (p.y-b.y)**2 < 15*15) {
+            this.botShells.splice(si, 1); removed = true;
+            this.eagleHit(o, b.o);
+          }
+        }
+        if (removed) continue;
+      }
+      for (const t of this.tanks) {
+        if (!t.alive || t.gone || t.inv > 0) continue;
+        if (this.side(t.id) === this.side(b.o)) continue;
+        if ((t.x-b.x)**2 + (t.y-b.y)**2 < (T_RADIUS+3)**2) {
+          this.botShells.splice(si, 1);
+          this.damage(t, b.o);
+          break;
+        }
+      }
+    }
+  }
+
   tick(dt) {
     if (this.state === 'countdown') {
       this.countdownT -= dt;
       if (this.countdownT <= 0) this.state = 'play';
     } else if (this.state === 'play') {
+      for (const i in this.botState) this.updateBotAI(+i, dt);
       for (const t of this.tanks) this.updateTank(t, dt);
+      this.updateBotShells(dt);
       if (isDom(this.gm)) this.updateDom(dt);
       if (this.gm === 'ctf') this.updateCTF(dt);
       if (this.respawnable()) {
@@ -513,6 +758,8 @@ class Game {
     const bl = [];
     for (let i = 0; i < this.n; i++)
       for (const b of this.shells[i]) bl.push({ i: i + '-' + b.i, x: b.x, y: b.y, o: i });
+    for (const b of this.botShells)
+      bl.push({ i: 'b' + b.o + '-' + b.n, x: +b.x.toFixed(1), y: +b.y.toFixed(1), o: b.o });
     return {
       t: 'snap', q, ts: Date.now(),
       st: this.state, cd: Math.max(0, this.countdownT | 0),
@@ -553,17 +800,17 @@ function genCode() {
 function lobbyMsg(room) {
   return JSON.stringify({
     t: 'lobby',
-    pl: room.clients.map((ws, i) => ({ n: room.names[i], team: room.teams[i] })),
+    pl: room.clients.map((ws, i) => ({ n: room.names[i], team: room.teams[i], bt: room.bots[i] ? 1 : 0 })),
     set: room.set,
     code: room.code
   });
 }
 function broadcastLobby(room) {
   const msg = lobbyMsg(room);
-  for (const ws of room.clients) if (ws.readyState === 1) ws.send(msg);
+  for (const ws of room.clients) if (ws && ws.readyState === 1) ws.send(msg);
 }
 function broadcast(room, str) {
-  for (const ws of room.clients) if (ws.readyState === 1) ws.send(str);
+  for (const ws of room.clients) if (ws && ws.readyState === 1) ws.send(str);
 }
 
 function startRoom(room) {
@@ -572,12 +819,13 @@ function startRoom(room) {
     tm: room.set.tm,
     teams: room.teams,
     gm: room.set.gm,
-    sub: room.set.sub
+    sub: room.set.sub,
+    bots: room.bots
   });
   room.started = true;
   broadcast(room, JSON.stringify({
     t: 'started',
-    pl: room.clients.map((ws, i) => ({ n: room.names[i], team: room.teams[i] })),
+    pl: room.clients.map((ws, i) => ({ n: room.names[i], team: room.teams[i], bt: room.bots[i] ? 1 : 0 })),
     set: room.set
   }));
   let last = Date.now();
@@ -619,7 +867,7 @@ wss.on('connection', ws => {
     if (m.t === 'create') {
       const code = genCode();
       rooms.set(code, {
-        code, clients: [ws], names: ['Player 1'], teams: [0],
+        code, clients: [ws], names: ['Player 1'], teams: [0], bots: [false],
         set: { gm: ['dm','dom','dom2','ctf','egl'].includes(m.gm) ? m.gm : 'dm', sub: 'last', tm: false },
         started: false, game: null, timer: null, pings: [0,0,0,0], q: 0
       });
@@ -638,9 +886,33 @@ wss.on('connection', ws => {
       r.clients.push(ws);
       r.names.push('Player ' + (idx + 1));
       r.teams.push(r.set.tm ? idx % 2 : 0);
+      r.bots.push(false);
       ws.room = code; ws.idx = idx;
       ws.send(JSON.stringify({ t: 'ready', idx }));
       broadcastLobby(r);
+
+    } else if (m.t === 'addbot') {
+      if (!room || room.started || ws.idx !== 0) return;
+      if (room.clients.length >= 4) { ws.send(JSON.stringify({ t: 'err', msg: 'ROOM IS FULL (4 MAX)' })); return; }
+      const idx = room.clients.length;
+      room.clients.push(null);
+      room.names.push('Bot ' + (idx + 1));
+      room.teams.push(room.set.tm ? idx % 2 : 0);
+      room.bots.push(true);
+      broadcastLobby(room);
+
+    } else if (m.t === 'rmbot') {
+      if (!room || room.started || ws.idx !== 0) return;
+      const who = m.who | 0;
+      if (!room.bots[who]) return;
+      room.clients.splice(who, 1);
+      room.names.splice(who, 1);
+      room.teams.splice(who, 1);
+      room.bots.splice(who, 1);
+      room.clients.forEach((c, j) => {
+        if (c) { c.idx = j; if (c.readyState === 1) c.send(JSON.stringify({ t: 'ready', idx: j })); }
+      });
+      broadcastLobby(room);
 
     } else if (m.t === 'name') {
       if (!room || room.started) return;
@@ -726,9 +998,9 @@ wss.on('connection', ws => {
         room.clients.splice(i, 1);
         room.names.splice(i, 1);
         room.teams.splice(i, 1);
+        room.bots.splice(i, 1);
         room.clients.forEach((c, j) => {
-          c.idx = j;
-          if (c.readyState === 1) c.send(JSON.stringify({ t: 'ready', idx: j }));
+          if (c) { c.idx = j; if (c.readyState === 1) c.send(JSON.stringify({ t: 'ready', idx: j })); }
         });
         broadcastLobby(room);
       }
@@ -737,8 +1009,9 @@ wss.on('connection', ws => {
 
     // in-game: the tank is abandoned, the match continues if 2+ remain
     room.game.playerLeft(ws.idx);
-    const remaining = room.clients.filter(c => c !== ws && c.readyState === 1).length;
-    if (remaining < 2) closeRoom(ws.room, true);
+    const humans = room.clients.filter(c => c && c !== ws && c.readyState === 1).length;
+    const botsLeft = room.bots.filter((b, i) => b && room.game.tanks[i] && !room.game.tanks[i].elim && !room.game.tanks[i].gone).length;
+    if (humans < 1 || humans + botsLeft < 2) closeRoom(ws.room, true);
   });
 });
 
