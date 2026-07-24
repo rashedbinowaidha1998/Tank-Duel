@@ -160,6 +160,7 @@
       <div class="btnrow" style="margin-bottom:14px">
         <button class="mini sel" id="pickDM">DEATHMATCH</button>
         <button class="mini" id="pickDom">DOMINATION · first to 100</button>
+        <button class="mini" id="pickDom2">DOMINATION X2 · two zones</button>
         <button class="mini" id="pickCTF">CAPTURE FLAG · first to 50</button>
         <button class="mini" id="pickEgl">EAGLE WAR</button>
       </div>
@@ -293,7 +294,7 @@ addEventListener('keydown', e => {
       newRound(); // fresh match: domination points reset too
     } else {
       round++;
-      newRound(gameMode === 'dom'); // mid-match round change keeps dom points
+      newRound(isDomMode(gameMode)); // mid-match round change keeps dom points
     }
   }
 });
@@ -413,6 +414,15 @@ function startOnlineGame() {
   hideOverlay();
 }
 
+function isDomMode(g) { return g === 'dom' || g === 'dom2'; }
+function domZonePts(g) {
+  if (g === 'dom2') return [
+    { x: Math.round(W * 0.32), y: Math.round(H * 0.35) },
+    { x: Math.round(W * 0.68), y: Math.round(H * 0.65) },
+  ];
+  return [{ x: W / 2, y: H / 2 }];
+}
+
 function eaglePoint(i) {
   const pts = [
     { x: 1*TILE + TILE/2, y: 1*TILE + TILE/2 },
@@ -508,6 +518,7 @@ function showLobby() {
   g1.append(mkLabel('MODE'));
   g1.append(mkBtn('DEATHMATCH', L.set.gm === 'dm', () => netSendRaw({ t: 'set', k: 'gm', v: 'dm' })));
   g1.append(mkBtn('DOMINATION', L.set.gm === 'dom', () => netSendRaw({ t: 'set', k: 'gm', v: 'dom' })));
+  g1.append(mkBtn('DOMINATION X2', L.set.gm === 'dom2', () => netSendRaw({ t: 'set', k: 'gm', v: 'dom2' })));
   g1.append(mkBtn('CAPTURE FLAG', L.set.gm === 'ctf', () => netSendRaw({ t: 'set', k: 'gm', v: 'ctf' })));
   g1.append(mkBtn('EAGLE WAR', L.set.gm === 'egl', () => netSendRaw({ t: 'set', k: 'gm', v: 'egl' })));
   set.append(g1);
@@ -565,7 +576,7 @@ function applySnapshot(m) {
       el.style.color = net.rtt < 90 ? '#9df06b' : net.rtt < 180 ? '#e8c85a' : '#e05555';
     }
   }
-  if (m.dm) { net.domP = m.dm.p; net.domC = m.dm.c; net.domO = m.dm.o; }
+  if (m.dm) { net.domP = m.dm.p; net.domZ = m.dm.z || null; }
   net.flags = m.fg || null;
   net.eagles = m.eg || null;
   for (let r = 0; r < ROWS; r++)
@@ -625,9 +636,13 @@ function applySnapshot(m) {
     }
     else if (e.e === 'cp') {
       const col = (mode === 'online') ? sideHex(e.w) : (e.w === 0 ? '#ffa62e' : '#3ed6c0');
-      const txt = (mode === 'online' && gameMode === 'dm') ? '+1 KILL' : 'CAPTURED!';
-      addFloater(gameMode === 'dm' ? W/2 : dom.zone.x, (gameMode === 'dm' ? 40 : dom.zone.y - 20), txt, col);
-      if (gameMode === 'dom') sparks(dom.zone.x, dom.zone.y, col, 18);
+      const isCapture = isDomMode(gameMode) && e.x != null;
+      if (isCapture) {
+        addFloater(e.x, e.y - 20, 'CAPTURED!', col);
+        sparks(e.x, e.y, col, 18);
+      } else {
+        addFloater(W/2, 40, '+1 KILL', col);
+      }
     }
   }
   updateHUD();
@@ -762,31 +777,33 @@ function ctfWin(i) {
 }
 
 function updateDom(dt) {
-  const z = dom.zone;
-  const inside = tanks.map(t => t.alive && Math.hypot(t.x - z.x, t.y - z.y) < z.r);
-
-  // the owner earns 1 point per second for as long as they hold the point
-  if (dom.owner !== -1) {
-    const before = Math.floor(dom.pts[dom.owner]);
-    dom.pts[dom.owner] = Math.min(100, dom.pts[dom.owner] + dt / 1000);
-    if (Math.floor(dom.pts[dom.owner]) !== before) updateHUD();
-    if (dom.pts[dom.owner] >= 100) { domWin(dom.owner); return; }
-  }
-
-  for (const i of [0, 1]) {
-    const o = 1 - i;
-    if (i === dom.owner) { dom.cap[i] = 0; continue; } // it's already yours
-    if (inside[i] && !inside[o]) dom.cap[i] = Math.min(100, dom.cap[i] + 25 * dt / 1000);
-    else if (!inside[i]) dom.cap[i] = Math.max(0, dom.cap[i] - 12.5 * dt / 1000);
-    // both inside → contested, meter freezes
-    if (dom.cap[i] >= 100) {
-      dom.cap[0] = 0; dom.cap[1] = 0;
-      dom.owner = i;
-      addFloater(z.x, z.y - 20, 'CAPTURED!', tanks[i].color);
-      sparks(z.x, z.y, tanks[i].color, 18);
-      netEv({ e: 'cp', w: i });
-      updateHUD();
+  let hudDirty = false;
+  for (const z of dom.zones) {
+    const inside = tanks.map(t => t.alive && Math.hypot(t.x - z.x, t.y - z.y) < z.r);
+    // every zone you own pays 1 point per second
+    if (z.owner !== -1) {
+      const before = Math.floor(dom.pts[z.owner]);
+      dom.pts[z.owner] = Math.min(100, dom.pts[z.owner] + dt / 1000);
+      if (Math.floor(dom.pts[z.owner]) !== before) hudDirty = true;
     }
+    for (const i of [0, 1]) {
+      const o = 1 - i;
+      if (i === z.owner) { z.cap[i] = 0; continue; }
+      if (inside[i] && !inside[o]) z.cap[i] = Math.min(100, z.cap[i] + 25 * dt / 1000);
+      else if (!inside[i]) z.cap[i] = Math.max(0, z.cap[i] - 12.5 * dt / 1000);
+      // both inside → contested, meter freezes
+      if (z.cap[i] >= 100) {
+        z.cap = [0, 0];
+        z.owner = i;
+        addFloater(z.x, z.y - 20, 'CAPTURED!', tanks[i].color);
+        sparks(z.x, z.y, tanks[i].color, 18);
+        hudDirty = true;
+      }
+    }
+  }
+  if (hudDirty) updateHUD();
+  for (const i of [0, 1]) {
+    if (dom.pts[i] >= 100) { domWin(i); return; }
   }
 }
 
@@ -864,10 +881,13 @@ function genMap() {
   clearZone(2, 2); clearZone(COLS-3, ROWS-3);
 
   // domination: open up the capture zone in the middle
-  if (gameMode === 'dom') {
-    for (let r = 1; r < ROWS-1; r++) for (let c = 1; c < COLS-1; c++) {
-      const dx = (c + 0.5) - COLS/2, dy = (r + 0.5) - ROWS/2;
-      if (dx*dx + dy*dy < 2.4*2.4) g[r][c] = 0;
+  if (isDomMode(gameMode)) {
+    for (const z of domZonePts(gameMode)) {
+      const zc = z.x / TILE, zr = z.y / TILE;
+      for (let r = 1; r < ROWS-1; r++) for (let c = 1; c < COLS-1; c++) {
+        const dx = (c + 0.5) - zc, dy = (r + 0.5) - zr;
+        if (dx*dx + dy*dy < 2.4*2.4) g[r][c] = 0;
+      }
     }
   }
 
@@ -884,7 +904,11 @@ function genMap() {
     });
   }
   if (!seen[ROWS-3][COLS-3]) return genMap();
-  if (gameMode === 'dom' && !seen[Math.floor(ROWS/2)][Math.floor(COLS/2)]) return genMap();
+  if (isDomMode(gameMode)) {
+    for (const z of domZonePts(gameMode)) {
+      if (!seen[Math.floor(z.y / TILE)][Math.floor(z.x / TILE)]) return genMap();
+    }
+  }
   return g;
 }
 
@@ -1064,7 +1088,7 @@ function lineOfSight(x0, y0, x1, y1) {
 function updateAI(t, dt) {
   const player = tanks[0];
   const inp = { fwd: false, back: false, left: false, right: false, fire: false };
-  const hasRespawns = gameMode === 'dom' || gameMode === 'ctf' || gameMode === 'egl' || botSub === 'kills';
+  const hasRespawns = isDomMode(gameMode) || gameMode === 'ctf' || gameMode === 'egl' || botSub === 'kills';
   if (!t.alive || (!player.alive && !hasRespawns)) { t.aiInput = inp; return; }
 
   // where the bot wants to go: the player in deathmatch, the zone in domination,
@@ -1081,10 +1105,20 @@ function updateAI(t, dt) {
     const ep = eaglePoint(0); // march on the player's eagle; fights happen en route
     gx = ep.x; gy = ep.y;
   }
-  if (gameMode === 'dom') {
-    const z = dom.zone;
-    gx = z.x; gy = z.y;
-    if (Math.hypot(t.x - z.x, t.y - z.y) < z.r * 0.55) holdZone = true; // parked on the point
+  if (isDomMode(gameMode) && dom.zones.length) {
+    // priority: a zone the bot doesn't own (nearest first); otherwise guard the nearest owned one
+    let best = null, bestD = 1e9;
+    for (const z of dom.zones) {
+      if (z.owner === 1) continue;
+      const d = Math.hypot(t.x - z.x, t.y - z.y);
+      if (d < bestD) { bestD = d; best = z; }
+    }
+    if (!best) for (const z of dom.zones) {
+      const d = Math.hypot(t.x - z.x, t.y - z.y);
+      if (d < bestD) { bestD = d; best = z; }
+    }
+    gx = best.x; gy = best.y;
+    if (Math.hypot(t.x - best.x, t.y - best.y) < best.r * 0.55) holdZone = true; // parked on the point
   }
 
   bot.repath -= dt;
@@ -1130,7 +1164,7 @@ function updateAI(t, dt) {
   if (bot.reverseT > 0) {
     bot.reverseT -= dt;
     inp.back = true; inp.right = true;
-  } else if (Math.abs(diff) < 0.9 && !holdZone && !(los && distP < TILE * 3.2 && gameMode !== 'dom')) {
+  } else if (Math.abs(diff) < 0.9 && !holdZone && !(los && distP < TILE * 3.2 && !isDomMode(gameMode))) {
     inp.fwd = true;
   }
 
@@ -1240,7 +1274,7 @@ function damage(t, by) {
     explode(t.x, t.y, t.color);
     netEv({ e: 'bm', x: t.x | 0, y: t.y | 0, c: t.color });
     shake = 14;
-    if (gameMode === 'dom') {
+    if (isDomMode(gameMode)) {
       dom.resp[t.id] = 2500; // respawn in 2.5s, match continues
       return;
     }
@@ -1406,7 +1440,7 @@ function draw() {
 
   ctx.drawImage(floorCanvas, 0, 0);
   for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) if (grid[r][c]) drawTile(c, r);
-  if (gameMode === 'dom') drawZone();
+  if (isDomMode(gameMode)) drawZones();
   if (gameMode === 'ctf') drawCTF();
   if (gameMode === 'egl') drawEagles();
 
@@ -1521,7 +1555,7 @@ function draw() {
   // respawn countdowns over the spawn points (domination & kill-points modes)
   if (state === 'play') {
     const respArr = (mode === 'online') ? net.domResp : dom.resp;
-    const canResp = gameMode === 'dom' || gameMode === 'ctf' || (mode === 'online' && net.sub === 'kills');
+    const canResp = isDomMode(gameMode) || gameMode === 'ctf' || gameMode === 'egl' || (mode === 'online' && net.sub === 'kills');
     if (canResp && respArr) {
       for (let i = 0; i < tanks.length; i++) {
         if (!tanks[i].alive && !tanks[i].gone && respArr[i] > 0) {
@@ -1673,37 +1707,40 @@ function sideHex(sIdx) {
   return (PCOLORS[sIdx] || ['#c8b98a'])[0];
 }
 
-function drawZone() {
-  const z = dom.zone;
-  const caps = (mode === 'online' && net.domC) ? net.domC : dom.cap;
-  const owner = (mode === 'online') ? net.domO : dom.owner;
-  let lead = 0;
-  for (let i = 1; i < caps.length; i++) if (caps[i] > caps[lead]) lead = i;
-  const capv = caps[lead] || 0;
-  const rgb = owner >= 0 ? sideRGB(owner) : '200,185,138';
-  ctx.save();
-  ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
-  ctx.fillStyle = `rgba(${rgb},.10)`; ctx.fill();
-  ctx.setLineDash([9, 7]); ctx.lineWidth = 2;
-  ctx.strokeStyle = `rgba(${rgb},.6)`; ctx.stroke();
-  ctx.setLineDash([]);
-  if (capv > 0.5) {
-    ctx.beginPath();
-    ctx.arc(z.x, z.y, z.r - 7, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * capv / 100);
-    ctx.lineWidth = 5;
-    ctx.strokeStyle = (mode === 'online') ? sideHex(lead) : (lead === 0 ? '#ffa62e' : '#3ed6c0');
-    ctx.stroke();
-    ctx.font = '900 16px "Courier New", monospace';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = ctx.strokeStyle;
-    ctx.fillText(Math.floor(capv) + '%', z.x, z.y);
-  } else {
-    ctx.font = '900 15px "Courier New", monospace';
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.fillStyle = `rgba(${rgb},.7)`;
-    ctx.fillText('◆', z.x, z.y);
+function drawZones() {
+  const zones = mode === 'online'
+    ? (net.domZ || []).map(z => ({ x: z.x, y: z.y, r: TILE * 2, cap: z.c, owner: z.o }))
+    : dom.zones;
+  for (const z of zones) {
+    const caps = z.cap || [0];
+    let lead = 0;
+    for (let i = 1; i < caps.length; i++) if (caps[i] > caps[lead]) lead = i;
+    const capv = caps[lead] || 0;
+    const rgb = z.owner >= 0 ? sideRGB(z.owner) : '200,185,138';
+    ctx.save();
+    ctx.beginPath(); ctx.arc(z.x, z.y, z.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(${rgb},.10)`; ctx.fill();
+    ctx.setLineDash([9, 7]); ctx.lineWidth = 2;
+    ctx.strokeStyle = `rgba(${rgb},.6)`; ctx.stroke();
+    ctx.setLineDash([]);
+    if (capv > 0.5) {
+      ctx.beginPath();
+      ctx.arc(z.x, z.y, z.r - 7, -Math.PI/2, -Math.PI/2 + Math.PI * 2 * capv / 100);
+      ctx.lineWidth = 5;
+      ctx.strokeStyle = (mode === 'online') ? sideHex(lead) : (lead === 0 ? '#ffa62e' : '#3ed6c0');
+      ctx.stroke();
+      ctx.font = '900 16px "Courier New", monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.fillText(Math.floor(capv) + '%', z.x, z.y);
+    } else {
+      ctx.font = '900 15px "Courier New", monospace';
+      ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+      ctx.fillStyle = `rgba(${rgb},.7)`;
+      ctx.fillText('◆', z.x, z.y);
+    }
+    ctx.restore();
   }
-  ctx.restore();
 }
 
 function drawCountdown() {
@@ -1747,6 +1784,9 @@ function newRound(keepDomPoints) {
     ? [0, 1].map(i => { const sp = spawnPoint(i); return { s: 0, x: sp.x, y: sp.y, b: -1, dropT: 0 }; })
     : null;
   localEagles = gameMode === 'egl' ? [{ h: 30, a: true }, { h: 30, a: true }] : null;
+  dom.zones = isDomMode(gameMode)
+    ? domZonePts(gameMode).map(z => ({ x: z.x, y: z.y, r: TILE * 2, owner: -1, cap: [0, 0] }))
+    : [];
   tanks.forEach(t => t.elim = false);
   bot.path = []; bot.repath = 0; bot.reverseT = 0; bot.stuckT = 0;
   bot.lastX = tanks[1].x; bot.lastY = tanks[1].y;
@@ -1796,6 +1836,7 @@ function buildHUD() {
 
 function onlineRoundLabel() {
   if (gameMode === 'egl') return 'EAGLE WAR · 10 KILLS OR RAZE THE BASES';
+  if (gameMode === 'dom2') return 'DOUBLE DOMINATION · FIRST TO 100';
   if (gameMode === 'ctf') return 'CAPTURE THE FLAG · FIRST TO ' + (net.roster ? net.roster.length * 25 : 100);
   if (gameMode === 'dom') return 'DOMINATION · FIRST TO 100';
   if (net.sub === 'kills') return 'FIRST TO 10 KILLS';
@@ -1808,7 +1849,7 @@ function updateHUD() {
       const sc = document.getElementById('pscore' + i);
       if (!sc) return;
       let val = scores[i] || 0;
-      if (gameMode === 'dom' && net.domP) val = net.domP[net.tm ? p.team : i] || 0;
+      if (isDomMode(gameMode) && net.domP) val = net.domP[net.tm ? p.team : i] || 0;
       sc.textContent = Math.floor(val);
       const hpEl = document.getElementById('php' + i);
       hpEl.innerHTML = '';
@@ -1832,10 +1873,11 @@ function updateHUD() {
     document.getElementById('score1').textContent = Math.floor(scores[0]);
     document.getElementById('score2').textContent = Math.floor(scores[1]);
     document.getElementById('roundLabel').textContent = 'CAPTURE THE FLAG · FIRST TO 50';
-  } else if (gameMode === 'dom') {
+  } else if (isDomMode(gameMode)) {
     document.getElementById('score1').textContent = Math.floor(dom.pts[0]);
     document.getElementById('score2').textContent = Math.floor(dom.pts[1]);
-    document.getElementById('roundLabel').textContent = 'DOMINATION · FIRST TO 100';
+    document.getElementById('roundLabel').textContent =
+      (gameMode === 'dom2' ? 'DOUBLE DOMINATION' : 'DOMINATION') + ' · FIRST TO 100';
   } else {
     document.getElementById('score1').textContent = scores[0];
     document.getElementById('score2').textContent = scores[1];
@@ -1873,9 +1915,16 @@ function setStatus(s) { document.getElementById('netStatus').textContent = s; }
 const $ = id => document.getElementById(id);
 let botSub = 'last'; // deathmatch ruleset vs the bot
 
+$('pickDom2').onclick = () => {
+  gameMode = 'dom2';
+  $('pickDom2').classList.add('sel');
+  ['pickDM','pickDom','pickCTF','pickEgl'].forEach(id => $(id).classList.remove('sel'));
+  $('dmSubRow').style.display = 'none';
+};
 $('pickEgl').onclick = () => {
   gameMode = 'egl';
   $('pickEgl').classList.add('sel');
+  $('pickDom2').classList.remove('sel');
   $('pickDM').classList.remove('sel');
   $('pickDom').classList.remove('sel');
   $('pickCTF').classList.remove('sel');
@@ -1885,6 +1934,7 @@ $('pickEgl').onclick = () => {
 $('pickCTF').onclick = () => {
   gameMode = 'ctf';
   $('pickCTF').classList.add('sel');
+  $('pickDom2').classList.remove('sel');
   $('pickEgl').classList.remove('sel');
   $('pickDM').classList.remove('sel');
   $('pickDom').classList.remove('sel');
@@ -1901,6 +1951,7 @@ subBtns.forEach(id => {
 $('pickDM').onclick = () => {
   gameMode = 'dm';
   $('pickDM').classList.add('sel');
+  $('pickDom2').classList.remove('sel');
   $('pickEgl').classList.remove('sel');
   $('pickDom').classList.remove('sel');
   $('pickCTF').classList.remove('sel');
@@ -1909,6 +1960,7 @@ $('pickDM').onclick = () => {
 $('pickDom').onclick = () => {
   gameMode = 'dom';
   $('pickDom').classList.add('sel');
+  $('pickDom2').classList.remove('sel');
   $('pickEgl').classList.remove('sel');
   $('pickDM').classList.remove('sel');
   $('pickCTF').classList.remove('sel');
@@ -2181,7 +2233,7 @@ function loopStep(now) {
       if (mode === 'bot') updateAI(tanks[1], dt);
       for (const t of tanks) updateTank(t, dt);
       updateBullets(dt);
-      if (gameMode === 'dom') {
+      if (isDomMode(gameMode)) {
         updateDom(dt);
         for (const i of [0, 1]) {
           if (!tanks[i].alive) {
